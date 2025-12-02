@@ -29,6 +29,10 @@ OPENAI_DISPLAY=""
 WEBSEARCH_URL=${WEBSEARCH_URL:-"http://localhost:3000"}
 ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-"true"}
 WEBSEARCH_ENGINES=${WEBSEARCH_ENGINES:-"duckduckgo,brave"}
+# Fetch URL content configuration (per-model enrichment)
+FETCH_URL_ENABLE=${FETCH_URL_ENABLE:-"true"}
+FETCH_URL_RESULTS=${FETCH_URL_RESULTS:-5}          # how many top URLs to fetch content for
+FETCH_URL_MAX_CHARS=${FETCH_URL_MAX_CHARS:-4000}   # truncate fetched content
 
 # Temporary directory for responses
 TEMP_DIR=$(mktemp -d)
@@ -78,7 +82,8 @@ get_model_label() {
 # Check if web search server is available
 check_websearch_server() {
     # Allow TRUE/true/True; anything else is treated as disabled
-    if [ "${ENABLE_WEB_SEARCH,,}" != "true" ]; then
+    local enable_lower=$(echo "$ENABLE_WEB_SEARCH" | tr '[:upper:]' '[:lower:]')
+    if [ "$enable_lower" != "true" ]; then
         return 1
     fi
 
@@ -109,6 +114,24 @@ web_search() {
         | jq -r '.results[] | "Title: \(.title)\nURL: \(.url)\nDescription: \(.description)\n---"' 2>/dev/null || echo ""
 }
 
+# Perform web search and return raw JSON results
+web_search_json() {
+    local query="$1"
+    local limit="${2:-5}"
+    local payload
+
+    payload=$(jq -nc \
+        --arg query "$query" \
+        --argjson limit "$limit" \
+        --arg engines "$WEBSEARCH_ENGINES" \
+        '{query: $query, limit: $limit,
+          engines: ($engines | split(",") | map(gsub("^\\s+|\\s+$"; "")))}')
+
+    curl -s -X POST "${WEBSEARCH_URL}/api/search" \
+        -H "Content-Type: application/json" \
+        -d "$payload"
+}
+
 # Fetch content from a specific URL
 fetch_url_content() {
     local url="$1"
@@ -122,15 +145,40 @@ fetch_url_content() {
         | jq -r '.content' 2>/dev/null || echo ""
 }
 
-# Determine if query needs web search (asks Gemini for quick decision)
+# Fetch content with truncation
+fetch_url_content_limited() {
+    local url="$1"
+    local payload
+
+    payload=$(jq -nc --arg url "$url" --argjson maxLen "$FETCH_URL_MAX_CHARS" '{url: $url, useBrowserFallback: true, maxContentLength: $maxLen}')
+
+    curl -s -X POST "${WEBSEARCH_URL}/api/fetchUrl" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        | jq -r '.content' 2>/dev/null || echo ""
+}
+
+# Determine if query needs web search (detects explicit requests or asks GPT-5.1 w/ higher reasoning)
 needs_web_search() {
     local query="$1"
+    local query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
+
+    # Check for explicit search request keywords
+    if [[ "$query_lower" =~ (search|find|look.up|fetch|get.news|latest|current|recent|today|web.search) ]]; then
+        return 0
+    fi
+
+    # Otherwise, ask GPT-5.1 for a decision (prefer higher reasoning for routing)
     local decision_prompt="Does this question require current/recent web information to answer accurately? Answer only YES or NO.
 
 Question: $query"
 
     local decision
-    decision=$(printf '%s' "$decision_prompt" | gemini --output-format text 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    if [ -n "${OPENAI_TOOL:-}" ]; then
+        decision=$(run_openai "$decision_prompt" "high" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    else
+        decision=$(printf '%s' "$decision_prompt" | gemini --output-format text 2>/dev/null | tr '[:lower:]' '[:upper:]')
+    fi
 
     if [[ "$decision" == *"YES"* ]]; then
         return 0
@@ -145,13 +193,14 @@ Question: $query"
 
 run_openai() {
     local prompt="$1"
+    local reasoning="${2:-medium}"  # Only used by codex; openai CLI ignores this flag
     if [ "$OPENAI_TOOL" = "openai" ]; then
         local payload
         payload=$(jq -cn --arg prompt "$prompt" '{messages:[{role:"user",content:$prompt}]}')
         openai api chat.completions.create -m "$OPENAI_MODEL" -g "$payload" \
             | jq -r '.choices[0].message.content // ""'
     else
-        codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort=high
+        codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning"
     fi
 }
 
@@ -245,52 +294,85 @@ echo -e "${NC}"
 echo -e "${YELLOW}Your Question:${NC} $QUERY\n"
 
 # ============================================================================
-# STAGE 0: Web Research (if needed)
-# ============================================================================
-
-WEB_RESEARCH_CONTEXT=""
-
-if check_websearch_server && needs_web_search "$QUERY"; then
-    print_header "STAGE 0: WEB RESEARCH"
-
-    echo -e "${BLUE}Searching the web for current information...${NC}"
-    WEB_RESEARCH_RESULTS=$(web_search "$QUERY" 5)
-
-    if [ -n "$WEB_RESEARCH_RESULTS" ]; then
-        echo -e "${GREEN}Web search completed. Found relevant results.${NC}\n"
-        echo "$WEB_RESEARCH_RESULTS" | head -20
-        echo ""
-
-        # Store research context for models
-        WEB_RESEARCH_CONTEXT="
-
-=== CURRENT WEB RESEARCH ===
-The following recent web search results may help answer the question:
-
-$WEB_RESEARCH_RESULTS
-
-=== END WEB RESEARCH ===
-
-"
-    else
-        echo -e "${YELLOW}Web search returned no results.${NC}\n"
-    fi
-else
-    echo -e "${CYAN}(Skipping web research - not needed or unavailable)${NC}\n"
-fi
-
-# ============================================================================
-# STAGE 1: Collect Individual Responses
+# STAGE 1: Collect Individual Responses (with independent web search)
 # ============================================================================
 
 print_header "STAGE 1: COLLECTING INDIVIDUAL RESPONSES"
+
+# Check if web search should be performed for this query
+ENABLE_WEB_SEARCH_FOR_QUERY=false
+if check_websearch_server && needs_web_search "$QUERY"; then
+    ENABLE_WEB_SEARCH_FOR_QUERY=true
+    echo -e "${CYAN}Web search enabled - each model will perform independent research${NC}\n"
+fi
 
 for model in "${MODEL_IDS[@]}"; do
     label=$(get_model_label "$model")
     echo -e "${BLUE}Querying ${label}...${NC}"
 
-    # Enhance prompt with web research context if available
-    enhanced_query="${WEB_RESEARCH_CONTEXT}${QUERY}"
+    # Perform independent web search for this model
+    if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = true ]; then
+        echo -e "${BLUE}  → Performing independent web search for ${label}...${NC}"
+        model_search_json=$(web_search_json "$QUERY" 5)
+        model_search_results_text=""
+        fetched_content=""
+
+        if [ -n "$model_search_json" ] && [ "$(echo "$model_search_json" | jq '.results | length')" -gt 0 ]; then
+            echo -e "${GREEN}  ✓ Search completed${NC}"
+            model_search_results_text=$(echo "$model_search_json" \
+                | jq -r '.results[] | "Title: \(.title)\nURL: \(.url)\nDescription: \(.description)\n---"')
+
+            # Optionally fetch main content from top URLs
+            fetch_url_enable_lower=$(echo "$FETCH_URL_ENABLE" | tr '[:upper:]' '[:lower:]')
+            if [ "$fetch_url_enable_lower" = "true" ]; then
+                echo -e "${BLUE}  → Fetching content from top URL(s)...${NC}"
+                fetch_count=0
+                while IFS= read -r url; do
+                    [ -z "$url" ] && continue
+                    ((fetch_count++))
+                    echo -e "${BLUE}    → Fetching: $url${NC}"
+                    content=$(fetch_url_content_limited "$url")
+                    if [ -n "$content" ]; then
+                        fetched_content="${fetched_content}
+
+--- CONTENT FROM: $url ---
+$content
+--- END CONTENT ---
+"
+                    else
+                        echo -e "${YELLOW}    ⚠ No content returned for $url${NC}"
+                    fi
+                    [ "$fetch_count" -ge "$FETCH_URL_RESULTS" ] && break
+                done < <(echo "$model_search_json" | jq -r '.results[].url')
+            fi
+
+            # Create model-specific context with both search results and fetched content (if any)
+            model_context="
+
+=== WEB SEARCH RESULTS FOR YOUR ANALYSIS ===
+The following web search results may help you answer the question:
+
+$model_search_results_text
+
+=== END WEB SEARCH RESULTS ===
+
+$( [ -n "$fetched_content" ] && cat <<'EOF'
+=== FETCHED WEB CONTENT ===
+Below is the actual content retrieved from the URLs above:
+EOF
+)
+$fetched_content
+$( [ -n "$fetched_content" ] && echo "=== END FETCHED CONTENT ===" )
+
+"
+            enhanced_query="${model_context}${QUERY}"
+        else
+            echo -e "${YELLOW}  ⚠ No search results found${NC}"
+            enhanced_query="$QUERY"
+        fi
+    else
+        enhanced_query="$QUERY"
+    fi
 
     response=$(invoke_model "$model" "$enhanced_query")
     printf '%s\n' "$response" >"$TEMP_DIR/${model}_response.txt"
@@ -332,9 +414,9 @@ SYNTH_PROMPT_FILE="$TEMP_DIR/synthesis_prompt.txt"
     echo "You are the Chairman of an AI council."
     echo "Question: $QUERY"
 
-    if [ -n "$WEB_RESEARCH_CONTEXT" ]; then
+    if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = true ]; then
         echo ""
-        echo "NOTE: The council members had access to current web research when forming their responses."
+        echo "NOTE: Each council member independently performed their own web research when forming their responses."
     fi
 
     echo ""
@@ -390,11 +472,11 @@ done
 echo -e "${CYAN}Summary:${NC}"
 echo "  • Council Members: $COUNCIL_SUMMARY"
 echo "  • Chairman: $CHAIRMAN_LABEL"
-if [ -n "$WEB_RESEARCH_CONTEXT" ]; then
-    echo "  • Web Research: Enabled (via ${WEBSEARCH_URL})"
+if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = true ]; then
+    echo "  • Web Research: Enabled - Each model performed independent research (via ${WEBSEARCH_URL})"
 else
     echo "  • Web Research: Disabled or unavailable"
 fi
-echo "  • Stages Completed: Web Research → Response Collection → Peer Review → Synthesis"
+echo "  • Stages Completed: Independent Research → Response Collection → Peer Review → Synthesis"
 echo "  • Responses saved in: $TEMP_DIR"
 echo ""
