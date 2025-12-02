@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Terminal LLM Council
+# Terminal LLM Council with Web Search Integration
 # Uses local CLI tools: openai, claude, and gemini
+# Integrates with open-webSearch MCP server for research capabilities
 
 set -euo pipefail
 
@@ -23,6 +24,11 @@ MODEL_IDS=("openai" "claude" "gemini")
 CHAIRMAN=${CHAIRMAN:-"openai"}
 OPENAI_TOOL=""
 OPENAI_DISPLAY=""
+
+# Web search configuration
+WEBSEARCH_URL=${WEBSEARCH_URL:-"http://localhost:3000"}
+ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-"true"}
+WEBSEARCH_ENGINES=${WEBSEARCH_ENGINES:-"duckduckgo,brave"}
 
 # Temporary directory for responses
 TEMP_DIR=$(mktemp -d)
@@ -65,6 +71,78 @@ get_model_label() {
     esac
 }
 
+# ============================================================================
+# WEB SEARCH HELPER FUNCTIONS
+# ============================================================================
+
+# Check if web search server is available
+check_websearch_server() {
+    # Allow TRUE/true/True; anything else is treated as disabled
+    if [ "${ENABLE_WEB_SEARCH,,}" != "true" ]; then
+        return 1
+    fi
+
+    if curl -s -f "${WEBSEARCH_URL}/api/health" >/dev/null 2>&1; then
+        return 0
+    else
+        echo -e "${YELLOW}Warning:${NC} Web search server not available at ${WEBSEARCH_URL}" >&2
+        return 1
+    fi
+}
+
+# Perform web search using REST API
+web_search() {
+    local query="$1"
+    local limit="${2:-5}"
+    local payload
+
+    payload=$(jq -nc \
+        --arg query "$query" \
+        --argjson limit "$limit" \
+        --arg engines "$WEBSEARCH_ENGINES" \
+        '{query: $query, limit: $limit,
+          engines: ($engines | split(",") | map(gsub("^\\s+|\\s+$"; "")))}')
+
+    curl -s -X POST "${WEBSEARCH_URL}/api/search" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        | jq -r '.results[] | "Title: \(.title)\nURL: \(.url)\nDescription: \(.description)\n---"' 2>/dev/null || echo ""
+}
+
+# Fetch content from a specific URL
+fetch_url_content() {
+    local url="$1"
+    local payload
+
+    payload=$(jq -nc --arg url "$url" '{url: $url, useBrowserFallback: true}')
+
+    curl -s -X POST "${WEBSEARCH_URL}/api/fetchUrl" \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        | jq -r '.content' 2>/dev/null || echo ""
+}
+
+# Determine if query needs web search (asks Gemini for quick decision)
+needs_web_search() {
+    local query="$1"
+    local decision_prompt="Does this question require current/recent web information to answer accurately? Answer only YES or NO.
+
+Question: $query"
+
+    local decision
+    decision=$(printf '%s' "$decision_prompt" | gemini --output-format text 2>/dev/null | tr '[:lower:]' '[:upper:]')
+
+    if [[ "$decision" == *"YES"* ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# ============================================================================
+# MODEL INVOCATION FUNCTIONS
+# ============================================================================
+
 run_openai() {
     local prompt="$1"
     if [ "$OPENAI_TOOL" = "openai" ]; then
@@ -79,12 +157,12 @@ run_openai() {
 
 run_claude() {
     local prompt="$1"
-    printf '%s' "$prompt" | claude --print --output-format text --model "$CLAUDE_MODEL" --tools ""
+    # Claude CLI will use MCP tools (e.g. web-search) if configured in its mcp.json
+    printf '%s' "$prompt" | claude --print --output-format text --model "$CLAUDE_MODEL"
 }
 
 run_gemini() {
     local prompt="$1"
-    # Use default model if GEMINI_MODEL is not specifically set to override
     if [ "$GEMINI_MODEL" = "gemini-2.0-flash-exp" ]; then
         printf '%s' "$prompt" | gemini --output-format text
     else
@@ -127,6 +205,10 @@ ensure_chairman() {
     fi
 }
 
+# ============================================================================
+# MAIN SCRIPT
+# ============================================================================
+
 # Check if query is provided
 if [ $# -eq 0 ]; then
     echo -e "${RED}Error: No query provided${NC}"
@@ -138,10 +220,10 @@ QUERY="$*"
 
 require_command "gemini"
 require_command "claude"
+require_command "jq"
 
 if command -v openai >/dev/null 2>&1; then
     OPENAI_TOOL="openai"
-    require_command "jq"
     OPENAI_DISPLAY="OpenAI CLI (${OPENAI_MODEL})"
 elif command -v codex >/dev/null 2>&1; then
     OPENAI_TOOL="codex"
@@ -156,11 +238,46 @@ CHAIRMAN_LABEL=$(get_model_label "$CHAIRMAN")
 
 echo -e "${BOLD}${MAGENTA}"
 echo "╔════════════════════════════════════════════════════════════════╗"
-echo "║                    TERMINAL LLM COUNCIL                        ║"
+echo "║            TERMINAL LLM COUNCIL (with Web Search)             ║"
 echo "╚════════════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
 
 echo -e "${YELLOW}Your Question:${NC} $QUERY\n"
+
+# ============================================================================
+# STAGE 0: Web Research (if needed)
+# ============================================================================
+
+WEB_RESEARCH_CONTEXT=""
+
+if check_websearch_server && needs_web_search "$QUERY"; then
+    print_header "STAGE 0: WEB RESEARCH"
+
+    echo -e "${BLUE}Searching the web for current information...${NC}"
+    WEB_RESEARCH_RESULTS=$(web_search "$QUERY" 5)
+
+    if [ -n "$WEB_RESEARCH_RESULTS" ]; then
+        echo -e "${GREEN}Web search completed. Found relevant results.${NC}\n"
+        echo "$WEB_RESEARCH_RESULTS" | head -20
+        echo ""
+
+        # Store research context for models
+        WEB_RESEARCH_CONTEXT="
+
+=== CURRENT WEB RESEARCH ===
+The following recent web search results may help answer the question:
+
+$WEB_RESEARCH_RESULTS
+
+=== END WEB RESEARCH ===
+
+"
+    else
+        echo -e "${YELLOW}Web search returned no results.${NC}\n"
+    fi
+else
+    echo -e "${CYAN}(Skipping web research - not needed or unavailable)${NC}\n"
+fi
 
 # ============================================================================
 # STAGE 1: Collect Individual Responses
@@ -171,7 +288,11 @@ print_header "STAGE 1: COLLECTING INDIVIDUAL RESPONSES"
 for model in "${MODEL_IDS[@]}"; do
     label=$(get_model_label "$model")
     echo -e "${BLUE}Querying ${label}...${NC}"
-    response=$(invoke_model "$model" "$QUERY")
+
+    # Enhance prompt with web research context if available
+    enhanced_query="${WEB_RESEARCH_CONTEXT}${QUERY}"
+
+    response=$(invoke_model "$model" "$enhanced_query")
     printf '%s\n' "$response" >"$TEMP_DIR/${model}_response.txt"
     print_model "$label"
     printf '%s\n\n' "$response"
@@ -210,6 +331,12 @@ SYNTH_PROMPT_FILE="$TEMP_DIR/synthesis_prompt.txt"
 {
     echo "You are the Chairman of an AI council."
     echo "Question: $QUERY"
+
+    if [ -n "$WEB_RESEARCH_CONTEXT" ]; then
+        echo ""
+        echo "NOTE: The council members had access to current web research when forming their responses."
+    fi
+
     echo ""
     for model in "${MODEL_IDS[@]}"; do
         label=$(get_model_label "$model")
@@ -263,6 +390,11 @@ done
 echo -e "${CYAN}Summary:${NC}"
 echo "  • Council Members: $COUNCIL_SUMMARY"
 echo "  • Chairman: $CHAIRMAN_LABEL"
-echo "  • Stages Completed: Response Collection → Peer Review → Synthesis"
+if [ -n "$WEB_RESEARCH_CONTEXT" ]; then
+    echo "  • Web Research: Enabled (via ${WEBSEARCH_URL})"
+else
+    echo "  • Web Research: Disabled or unavailable"
+fi
+echo "  • Stages Completed: Web Research → Response Collection → Peer Review → Synthesis"
 echo "  • Responses saved in: $TEMP_DIR"
 echo ""
