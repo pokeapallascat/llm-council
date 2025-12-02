@@ -1,6 +1,4 @@
-# LLM Council
-
-![llmcouncil](header.jpg)
+# LLM Council In Your Terminal
 
 Query multiple LLMs together as a "council." Instead of asking a single model, send your prompt to several models at once. They answer independently, review each other anonymously, and a designated chairman produces the final answer.
 
