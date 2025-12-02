@@ -2,7 +2,9 @@
 
 ![llmcouncil](header.jpg)
 
-The idea of this repo is that instead of asking a question to your favorite LLM provider (e.g. OpenAI GPT 5.1, Google Gemini 3.0 Pro, Anthropic Claude Sonnet 4.5, xAI Grok 4, etc.), you can group them into your "LLM Council". This is a terminal-based tool that sends your query to multiple LLMs, asks them to review and rank each other's work, and finally has a Chairman LLM produce the final response.
+Query multiple LLMs together as a "council." Instead of asking a single model, send your prompt to several models at once. They answer independently, review each other anonymously, and a designated chairman produces the final answer.
+
+**Terminal-first workflow.** Uses your existing CLI subscriptions (OpenAI, Anthropic, Google). No OpenRouter key required.
 
 In a bit more detail, here is what happens when you submit a query:
 
@@ -16,16 +18,18 @@ This project was 99% vibe coded as a fun Saturday hack because I wanted to explo
 
 ## Quick Start
 
-### 1. Install Required CLIs
+### 1. Install and Authenticate CLI Tools
 
-You need at least these CLI tools installed:
-- `gemini` - [Google AI CLI](https://github.com/google/generative-ai-docs/tree/main/demos/palm/cli)
-- `claude` - [Anthropic Claude CLI](https://docs.anthropic.com/claude/docs/claude-cli)
-- `openai` or `codex` - [OpenAI CLI](https://github.com/openai/openai-python)
+You need these CLI tools **already set up with your existing subscriptions**:
+- `gemini` - [Google AI CLI](https://github.com/google/generative-ai-docs/tree/main/demos/palm/cli) (uses your Google AI API key)
+- `claude` - [Anthropic Claude CLI](https://docs.anthropic.com/claude/docs/claude-cli) (uses your Anthropic API key)
+- `openai` or `codex` - [OpenAI CLI](https://github.com/openai/openai-python) (uses your OpenAI API key)
 
 Plus standard tools:
 - `jq` - JSON processor
 - `curl` - HTTP client
+
+**No additional accounts or API keys beyond your existing CLI keys** – the scripts reuse whatever you already configured for your CLIs.
 
 ### 2. Set Up Global Alias (Recommended)
 
@@ -54,13 +58,13 @@ MODE=http ENABLE_CORS=true DEFAULT_SEARCH_ENGINE=brave node build/index.js
 
 ## Usage
 
-### Basic Council (No Web Search)
+### Basic Council (no web server required)
 
 ```bash
 ./terminal_council.sh "Explain the attention mechanism in transformers"
 ```
 
-Or with the alias:
+Or with the alias (calls the web-search-aware script; it will still skip search when not needed):
 ```bash
 ai_council "Explain the attention mechanism in transformers"
 ```
@@ -202,11 +206,13 @@ Stage 3: Chairman Synthesis
     terminal_council_with_websearch.sh
 ```
 
-## Web UI (Archived)
+## Web UI (Optional, Archived)
 
-The original web-based implementation (FastAPI + React + OpenRouter) has been archived to the `archive/web-ui` branch. It provides a browser-based interface with conversation history and tab-based stage viewing.
+A web-based implementation exists but is **optional and archived**. The main development focus is on terminal scripts.
 
-To use the web UI:
+The archived web UI (FastAPI + React + OpenRouter) provides a browser-based interface with conversation history and tab-based stage viewing. It's preserved in the `archive/web-ui` branch.
+
+To use the archived web UI:
 ```bash
 git checkout archive/web-ui
 # Follow instructions in ARCHIVE_README.md
