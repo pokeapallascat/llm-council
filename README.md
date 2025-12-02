@@ -12,7 +12,7 @@ In a bit more detail, here is what happens when you submit a query:
 
 ## Vibe Code Alert
 
-This project was 99% vibe coded as a fun Saturday hack because I wanted to explore and evaluate a number of LLMs side by side in the process of [reading books together with LLMs](https://x.com/karpathy/status/1990577951671509438). It's nice and useful to see multiple responses side by side, and also the cross-opinions of all LLMs on each other's outputs. The codebase has evolved to focus on terminal-first workflows with integrated web search capabilities. Vibe coded with Claude Code, reviewed and optimized by Codex (GPT-5.1).
+This project was 99% vibe coded. The codebase has evolved to focus on terminal-first workflows with integrated web search capabilities. Vibe coded with Claude Code, reviewed and optimized by Codex (GPT-5.1).
 
 ## Quick Start
 
@@ -246,6 +246,3 @@ FETCH_URL_RESULTS=3 ai_council "latest developments in AI safety"
 
 This is a personal hack project, but feel free to fork and modify! The codebase is intentionally simple and hackable.
 
-## License
-
-MIT
