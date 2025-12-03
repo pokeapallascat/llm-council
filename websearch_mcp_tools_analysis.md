@@ -1,10 +1,10 @@
-# Open-WebSearch Codebase Analysis - Complete Documentation Index
+# open-webSearch MCP Tools Analysis & Documentation Index
 
-This document serves as a comprehensive index to all analysis documents created for the open-webSearch project.
+This document serves as a comprehensive index to all analysis documents created for the `open-webSearch` web-search MCP/REST server used by the terminal LLM council.
 
 ## Analysis Documents Location
 
-All analysis documents are saved in: `/Users/earthling/ai_Council/open-webSearch/`
+All analysis documents are saved in: `open-webSearch/` directory
 
 ## Available Documents
 
@@ -120,34 +120,34 @@ All analysis documents are saved in: `/Users/earthling/ai_Council/open-webSearch
 ## Files Analyzed
 
 ### Main Entry Points
-- `/Users/earthling/ai_Council/open-webSearch/src/index.ts` (165 lines)
-- `/Users/earthling/ai_Council/open-webSearch/package.json`
-- `/Users/earthling/ai_Council/open-webSearch/tsconfig.json`
+- `open-webSearch/src/index.ts` (165 lines)
+- `open-webSearch/package.json`
+- `open-webSearch/tsconfig.json`
 
 ### Configuration & Types
-- `/Users/earthling/ai_Council/open-webSearch/src/config.ts` (100 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/types.ts` (7 lines)
+- `open-webSearch/src/config.ts` (100 lines)
+- `open-webSearch/src/types.ts` (7 lines)
 
 ### Tool Registration & API
-- `/Users/earthling/ai_Council/open-webSearch/src/tools/setupTools.ts` (432 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/rest/restApi.ts` (134 lines)
+- `open-webSearch/src/tools/setupTools.ts` (432 lines)
+- `open-webSearch/src/rest/restApi.ts` (134 lines)
 
 ### Content Extraction
-- `/Users/earthling/ai_Council/open-webSearch/src/contentExtractor/enhancedContentExtractor.ts` (309 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/contentExtractor/browserPool.ts` (124 lines)
+- `open-webSearch/src/contentExtractor/enhancedContentExtractor.ts` (309 lines)
+- `open-webSearch/src/contentExtractor/browserPool.ts` (124 lines)
 
 ### Search Engines (Sample implementations analyzed)
-- `/Users/earthling/ai_Council/open-webSearch/src/engines/bing/bing.ts` (72 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/engines/duckduckgo/searchDuckDuckGo.ts` (307 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/engines/exa/exa.ts` (92 lines)
+- `open-webSearch/src/engines/bing/bing.ts` (72 lines)
+- `open-webSearch/src/engines/duckduckgo/searchDuckDuckGo.ts` (307 lines)
+- `open-webSearch/src/engines/exa/exa.ts` (92 lines)
 
 ### Article Fetchers (Sample implementations analyzed)
-- `/Users/earthling/ai_Council/open-webSearch/src/engines/github/github.ts` (127 lines)
-- `/Users/earthling/ai_Council/open-webSearch/src/engines/csdn/fetchCsdnArticle.ts` (20 lines)
+- `open-webSearch/src/engines/github/github.ts` (127 lines)
+- `open-webSearch/src/engines/csdn/fetchCsdnArticle.ts` (20 lines)
 
 ### Documentation Analyzed
-- `/Users/earthling/ai_Council/open-webSearch/README.md` (546 lines)
-- `/Users/earthling/ai_Council/open-webSearch/MULTI_CLI_SETUP.md` (400+ lines)
+- `open-webSearch/README.md` (546 lines)
+- `open-webSearch/MULTI_CLI_SETUP.md` (400+ lines)
 
 ---
 
@@ -292,11 +292,10 @@ All questions are answered comprehensively in the analysis documents.
 
 ## Additional Resources
 
-- **Project Repository**: `/Users/earthling/ai_Council/open-webSearch`
-- **Source Code**: `/Users/earthling/ai_Council/open-webSearch/src/`
-- **Package Information**: `/Users/earthling/ai_Council/open-webSearch/package.json`
-- **Original README**: `/Users/earthling/ai_Council/open-webSearch/README.md`
-- **Original Docs**: `/Users/earthling/ai_Council/open-webSearch/MULTI_CLI_SETUP.md`
+- **Project Repository**: Root directory of this project
+- **Web Search Source**: `open-webSearch/` subdirectory
+- **Terminal Script**: `terminal_council_with_websearch.sh`
+- **Project Documentation**: `README.md`
 
 ---
 
@@ -315,10 +314,7 @@ All questions are answered comprehensively in the analysis documents.
 
 ## Contact & Updates
 
-These documents are meant to be reference material. For the latest project information:
-- Check the project's GitHub repository
-- Review the project's README.md
-- Check for updates to the codebase
+These documents are reference material for the open-webSearch MCP server and its integration with the LLM Council terminal system. For the latest information, check `README.md` in the project root.
 
 ---
 

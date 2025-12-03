@@ -31,8 +31,26 @@ ENABLE_WEB_SEARCH=${ENABLE_WEB_SEARCH:-"true"}
 WEBSEARCH_ENGINES=${WEBSEARCH_ENGINES:-"duckduckgo,brave"}
 # Fetch URL content configuration (per-model enrichment)
 FETCH_URL_ENABLE=${FETCH_URL_ENABLE:-"true"}
-FETCH_URL_RESULTS=${FETCH_URL_RESULTS:-5}          # how many top URLs to fetch content for
-FETCH_URL_MAX_CHARS=${FETCH_URL_MAX_CHARS:-4000}   # truncate fetched content
+FETCH_URL_RESULTS=${FETCH_URL_RESULTS:-5}           # how many top URLs to fetch content for
+FETCH_URL_MAX_CHARS=${FETCH_URL_MAX_CHARS:-8000}    # truncate fetched content (increased for more context)
+
+# Response length configuration (max output tokens)
+MAX_TOKENS_STAGE1=${MAX_TOKENS_STAGE1:-4000}        # Initial responses with research (detailed)
+MAX_TOKENS_STAGE2=${MAX_TOKENS_STAGE2:-500}         # Peer reviews (concise)
+MAX_TOKENS_STAGE3=${MAX_TOKENS_STAGE3:-6000}        # Final synthesis (comprehensive)
+
+# Token tracking (bash 3.2 compatible - using separate variables per model)
+OPENAI_INPUT_TOKENS=0
+OPENAI_OUTPUT_TOKENS=0
+OPENAI_TOTAL_TOKENS=0
+CLAUDE_INPUT_TOKENS=0
+CLAUDE_OUTPUT_TOKENS=0
+CLAUDE_TOTAL_TOKENS=0
+GEMINI_INPUT_TOKENS=0
+GEMINI_OUTPUT_TOKENS=0
+GEMINI_TOTAL_TOKENS=0
+TOTAL_INPUT_TOKENS=0
+TOTAL_OUTPUT_TOKENS=0
 
 # Temporary directory for responses
 TEMP_DIR=$(mktemp -d)
@@ -75,6 +93,193 @@ get_model_label() {
     esac
 }
 
+# Estimate tokens from text (rough approximation: 1 token ≈ 4 characters)
+estimate_tokens() {
+    local text="$1"
+    local char_count=${#text}
+    echo $(( char_count / 4 ))
+}
+
+# Track token usage for a model (bash 3.2 compatible)
+track_tokens() {
+    local model="$1"
+    local input_tokens="$2"
+    local output_tokens="$3"
+
+    # Accumulate per model using case statement
+    case "$model" in
+        openai)
+            OPENAI_INPUT_TOKENS=$(( OPENAI_INPUT_TOKENS + input_tokens ))
+            OPENAI_OUTPUT_TOKENS=$(( OPENAI_OUTPUT_TOKENS + output_tokens ))
+            OPENAI_TOTAL_TOKENS=$(( OPENAI_TOTAL_TOKENS + input_tokens + output_tokens ))
+            ;;
+        claude)
+            CLAUDE_INPUT_TOKENS=$(( CLAUDE_INPUT_TOKENS + input_tokens ))
+            CLAUDE_OUTPUT_TOKENS=$(( CLAUDE_OUTPUT_TOKENS + output_tokens ))
+            CLAUDE_TOTAL_TOKENS=$(( CLAUDE_TOTAL_TOKENS + input_tokens + output_tokens ))
+            ;;
+        gemini)
+            GEMINI_INPUT_TOKENS=$(( GEMINI_INPUT_TOKENS + input_tokens ))
+            GEMINI_OUTPUT_TOKENS=$(( GEMINI_OUTPUT_TOKENS + output_tokens ))
+            GEMINI_TOTAL_TOKENS=$(( GEMINI_TOTAL_TOKENS + input_tokens + output_tokens ))
+            ;;
+    esac
+
+    # Update global totals
+    TOTAL_INPUT_TOKENS=$(( TOTAL_INPUT_TOKENS + input_tokens ))
+    TOTAL_OUTPUT_TOKENS=$(( TOTAL_OUTPUT_TOKENS + output_tokens ))
+}
+
+# ============================================================================
+# SESSION DOCUMENTATION FUNCTIONS
+# ============================================================================
+
+# Sanitize question for use as filename
+sanitize_filename() {
+    local text="$1"
+    # Convert to lowercase, replace spaces/special chars with underscores, limit length
+    echo "$text" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | cut -c1-80 | sed 's/_$//'
+}
+
+# Save complete session documentation
+save_session_documentation() {
+    local sessions_dir="council_sessions"
+    mkdir -p "$sessions_dir"
+
+    local timestamp
+    timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
+    local sanitized_query
+    sanitized_query=$(sanitize_filename "$QUERY")
+    local filename="${sessions_dir}/${timestamp}_${sanitized_query}.md"
+
+    {
+        echo "# Council Session: $QUERY"
+        echo ""
+        echo "**Date:** $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "**Council Members:** $COUNCIL_SUMMARY"
+        echo "**Chairman:** $CHAIRMAN_LABEL"
+        if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = true ]; then
+            echo "**Web Research:** Enabled (${FETCH_URL_RESULTS} URLs × ${FETCH_URL_MAX_CHARS} chars each)"
+        else
+            echo "**Web Research:** Disabled"
+        fi
+        echo ""
+        echo "---"
+        echo ""
+
+        # Stage 1: Initial Responses with Web Research
+        echo "## Stage 1: Independent Research & Responses"
+        echo ""
+        for model in "${MODEL_IDS[@]}"; do
+            label=$(get_model_label "$model")
+            echo "### $label"
+            echo ""
+
+            # Include web research data if available
+            local search_file
+            local content_file
+            search_file="$TEMP_DIR/${model}_search_results.txt"
+            content_file="$TEMP_DIR/${model}_fetched_content.txt"
+
+            if [ -f "$search_file" ] && [ -s "$search_file" ]; then
+                echo "#### Web Research Performed"
+                echo ""
+                echo "**Search Results:**"
+                echo '```'
+                cat "$search_file"
+                echo '```'
+                echo ""
+            fi
+
+            if [ -f "$content_file" ] && [ -s "$content_file" ]; then
+                echo "**Full Content Fetched:**"
+                echo '```'
+                cat "$content_file"
+                echo '```'
+                echo ""
+            fi
+
+            echo "#### Response"
+            echo ""
+            cat "$TEMP_DIR/${model}_response.txt"
+            echo ""
+            echo ""
+        done
+
+        # Stage 2: Peer Reviews
+        echo "---"
+        echo ""
+        echo "## Stage 2: Peer Reviews"
+        echo ""
+        for reviewer in "${MODEL_IDS[@]}"; do
+            reviewer_label=$(get_model_label "$reviewer")
+            echo "### Reviews by $reviewer_label"
+            echo ""
+            for reviewee in "${MODEL_IDS[@]}"; do
+                if [ "$reviewer" = "$reviewee" ]; then
+                    continue
+                fi
+                reviewee_label=$(get_model_label "$reviewee")
+                review_path="$TEMP_DIR/review_${reviewer}_${reviewee}.txt"
+                if [ -s "$review_path" ]; then
+                    echo "#### Reviewing $reviewee_label"
+                    echo ""
+                    cat "$review_path"
+                    echo ""
+                fi
+            done
+            echo ""
+        done
+
+        # Stage 3: Final Synthesis
+        echo "---"
+        echo ""
+        echo "## Stage 3: Final Synthesis"
+        echo ""
+        echo "### $CHAIRMAN_LABEL (Chairman)"
+        echo ""
+        printf '%s\n' "$FINAL_RESPONSE"
+        echo ""
+        echo ""
+
+        # Token Usage Report
+        echo "---"
+        echo ""
+        echo "## Token Usage Report"
+        echo ""
+        echo "### Per-Model Token Usage"
+        echo ""
+        for model in "${MODEL_IDS[@]}"; do
+            label=$(get_model_label "$model")
+            case "$model" in
+                openai)
+                    echo "- **$label**: Input: $OPENAI_INPUT_TOKENS | Output: $OPENAI_OUTPUT_TOKENS | Total: $OPENAI_TOTAL_TOKENS"
+                    ;;
+                claude)
+                    echo "- **$label**: Input: $CLAUDE_INPUT_TOKENS | Output: $CLAUDE_OUTPUT_TOKENS | Total: $CLAUDE_TOTAL_TOKENS"
+                    ;;
+                gemini)
+                    echo "- **$label**: Input: $GEMINI_INPUT_TOKENS | Output: $GEMINI_OUTPUT_TOKENS | Total: $GEMINI_TOTAL_TOKENS"
+                    ;;
+            esac
+        done
+        echo ""
+        echo "### Overall Token Usage"
+        echo ""
+        grand_total=$((TOTAL_INPUT_TOKENS + TOTAL_OUTPUT_TOKENS))
+        echo "- **Total Input:** $TOTAL_INPUT_TOKENS tokens"
+        echo "- **Total Output:** $TOTAL_OUTPUT_TOKENS tokens"
+        echo "- **Grand Total:** $grand_total tokens"
+        echo ""
+        echo "---"
+        echo ""
+        echo "*Session documentation generated by Terminal LLM Council*"
+
+    } > "$filename"
+
+    echo "$filename"
+}
+
 # ============================================================================
 # WEB SEARCH HELPER FUNCTIONS
 # ============================================================================
@@ -82,7 +287,8 @@ get_model_label() {
 # Check if web search server is available
 check_websearch_server() {
     # Allow TRUE/true/True; anything else is treated as disabled
-    local enable_lower=$(echo "$ENABLE_WEB_SEARCH" | tr '[:upper:]' '[:lower:]')
+    local enable_lower
+    enable_lower=$(echo "$ENABLE_WEB_SEARCH" | tr '[:upper:]' '[:lower:]')
     if [ "$enable_lower" != "true" ]; then
         return 1
     fi
@@ -161,7 +367,8 @@ fetch_url_content_limited() {
 # Determine if query needs web search (detects explicit requests or asks GPT-5.1 w/ higher reasoning)
 needs_web_search() {
     local query="$1"
-    local query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
+    local query_lower
+    query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
 
     # Check for explicit search request keywords
     if [[ "$query_lower" =~ (search|find|look.up|fetch|get.news|latest|current|recent|today|web.search) ]]; then
@@ -175,7 +382,8 @@ Question: $query"
 
     local decision
     if [ -n "${OPENAI_TOOL:-}" ]; then
-        decision=$(run_openai "$decision_prompt" "high" 2>/dev/null | tr '[:lower:]' '[:upper:]')
+        # Use a small token budget for this quick routing decision
+        decision=$(run_openai "$decision_prompt" "high" 128 2>/dev/null | tr '[:lower:]' '[:upper:]')
     else
         decision=$(printf '%s' "$decision_prompt" | gemini --output-format text 2>/dev/null | tr '[:lower:]' '[:upper:]')
     fi
@@ -193,25 +401,40 @@ Question: $query"
 
 run_openai() {
     local prompt="$1"
-    local reasoning="${2:-medium}"  # Only used by codex; openai CLI ignores this flag
+    local reasoning="${2:-high}"  # Default to high reasoning since codex is chairman
+    local max_tokens="${3:-}"     # Optional max_tokens for OpenAI/Codex
+
     if [ "$OPENAI_TOOL" = "openai" ]; then
         local payload
-        payload=$(jq -cn --arg prompt "$prompt" '{messages:[{role:"user",content:$prompt}]}')
+        if [ -n "$max_tokens" ]; then
+            payload=$(jq -cn --arg prompt "$prompt" --argjson max_tokens "$max_tokens" \
+                '{messages:[{role:"user",content:$prompt}], max_tokens: $max_tokens}')
+        else
+            payload=$(jq -cn --arg prompt "$prompt" \
+                '{messages:[{role:"user",content:$prompt}]}')
+        fi
         openai api chat.completions.create -m "$OPENAI_MODEL" -g "$payload" \
             | jq -r '.choices[0].message.content // ""'
     else
-        codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning"
+        # codex uses config file for other settings; honor max_tokens if provided
+        if [ -n "$max_tokens" ]; then
+            codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning" -c max_tokens="$max_tokens"
+        else
+            codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning"
+        fi
     fi
 }
 
 run_claude() {
     local prompt="$1"
     # Claude CLI will use MCP tools (e.g. web-search) if configured in its mcp.json
+    # Note: --max-tokens not reliably supported across all versions
     printf '%s' "$prompt" | claude --print --output-format text --model "$CLAUDE_MODEL"
 }
 
 run_gemini() {
     local prompt="$1"
+    # Gemini CLI - using model defaults for max tokens
     if [ "$GEMINI_MODEL" = "gemini-2.0-flash-exp" ]; then
         printf '%s' "$prompt" | gemini --output-format text
     else
@@ -222,12 +445,30 @@ run_gemini() {
 invoke_model() {
     local model="$1"
     local prompt="$2"
+    # Optional max_tokens: enforced for OpenAI/Codex, ignored by Claude/Gemini
+    local max_tokens="${3:-}"
+    local response
+
+    # Get response from model
     case "$model" in
-        openai) run_openai "$prompt" ;;
-        claude) run_claude "$prompt" ;;
-        gemini) run_gemini "$prompt" ;;
+        openai)
+            if [ -n "$max_tokens" ]; then
+                response=$(run_openai "$prompt" "high" "$max_tokens")
+            else
+                response=$(run_openai "$prompt" "high")
+            fi
+            ;;
+        claude)
+            response=$(run_claude "$prompt")
+            ;;
+        gemini)
+            response=$(run_gemini "$prompt")
+            ;;
         *) echo "Unknown model: $model" >&2; exit 1 ;;
     esac
+
+    # Return response only (tracking happens outside to avoid subshell variable loss)
+    echo "$response"
 }
 
 build_review_prompt() {
@@ -245,6 +486,99 @@ $peer_response
 Provide a concise critique in 2-3 sentences that covers accuracy, completeness, and clarity.
 Finish with "Rating: X/5".
 EOF
+}
+
+# Helper to get token stats for a model (bash 3.2 compatible)
+get_model_tokens() {
+    local model="$1"
+    local stat_type="$2"  # input, output, or total
+
+    case "$model" in
+        openai)
+            case "$stat_type" in
+                input) echo "$OPENAI_INPUT_TOKENS" ;;
+                output) echo "$OPENAI_OUTPUT_TOKENS" ;;
+                total) echo "$OPENAI_TOTAL_TOKENS" ;;
+            esac
+            ;;
+        claude)
+            case "$stat_type" in
+                input) echo "$CLAUDE_INPUT_TOKENS" ;;
+                output) echo "$CLAUDE_OUTPUT_TOKENS" ;;
+                total) echo "$CLAUDE_TOTAL_TOKENS" ;;
+            esac
+            ;;
+        gemini)
+            case "$stat_type" in
+                input) echo "$GEMINI_INPUT_TOKENS" ;;
+                output) echo "$GEMINI_OUTPUT_TOKENS" ;;
+                total) echo "$GEMINI_TOTAL_TOKENS" ;;
+            esac
+            ;;
+        *) echo "0" ;;
+    esac
+}
+
+print_token_report() {
+    echo -e "\n${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${BOLD}${CYAN}TOKEN USAGE REPORT${NC}"
+    echo -e "${BOLD}${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}\n"
+
+    # Per-model breakdown
+    echo -e "${BOLD}${YELLOW}Per-Model Token Usage:${NC}"
+    for model in "${MODEL_IDS[@]}"; do
+        local label
+        local input
+        local output
+        local total
+        label=$(get_model_label "$model")
+        input=$(get_model_tokens "$model" "input")
+        output=$(get_model_tokens "$model" "output")
+        total=$(get_model_tokens "$model" "total")
+
+        printf "  ${GREEN}%-45s${NC}\n" "$label"
+        printf "    Input:  %10d tokens\n" "$input"
+        printf "    Output: %10d tokens\n" "$output"
+        printf "    ${BOLD}Total:  %10d tokens${NC}\n" "$total"
+        echo ""
+    done
+
+    # Chairman if different from council
+    local chairman_used=false
+    for model in "${MODEL_IDS[@]}"; do
+        if [ "$model" = "$CHAIRMAN" ]; then
+            chairman_used=true
+            break
+        fi
+    done
+
+    if [ "$chairman_used" = false ]; then
+        local label
+        local input
+        local output
+        local total
+        label=$(get_model_label "$CHAIRMAN")
+        input=$(get_model_tokens "$CHAIRMAN" "input")
+        output=$(get_model_tokens "$CHAIRMAN" "output")
+        total=$(get_model_tokens "$CHAIRMAN" "total")
+
+        printf "  ${GREEN}%-45s${NC} (Chairman only)\n" "$label"
+        printf "    Input:  %10d tokens\n" "$input"
+        printf "    Output: %10d tokens\n" "$output"
+        printf "    ${BOLD}Total:  %10d tokens${NC}\n" "$total"
+        echo ""
+    fi
+
+    # Global totals
+    local grand_total=$(( TOTAL_INPUT_TOKENS + TOTAL_OUTPUT_TOKENS ))
+    echo -e "${BOLD}${MAGENTA}Overall Token Usage:${NC}"
+    printf "  Total Input:  %10d tokens\n" "$TOTAL_INPUT_TOKENS"
+    printf "  Total Output: %10d tokens\n" "$TOTAL_OUTPUT_TOKENS"
+    printf "  ${BOLD}Grand Total:  %10d tokens${NC}\n" "$grand_total"
+    echo ""
+    echo -e "${CYAN}Note: Token counts are estimated based on character count (1 token ≈ 4 chars)${NC}"
+    echo -e "${CYAN}Actual usage may vary depending on the model's tokenizer.${NC}"
+    echo ""
 }
 
 ensure_chairman() {
@@ -270,6 +604,7 @@ QUERY="$*"
 require_command "gemini"
 require_command "claude"
 require_command "jq"
+require_command "curl"
 
 if command -v openai >/dev/null 2>&1; then
     OPENAI_TOOL="openai"
@@ -346,6 +681,12 @@ $content
                 done < <(echo "$model_search_json" | jq -r '.results[].url')
             fi
 
+            # Save search results and fetched content for session documentation
+            printf '%s\n' "$model_search_results_text" >"$TEMP_DIR/${model}_search_results.txt"
+            if [ -n "$fetched_content" ]; then
+                printf '%s\n' "$fetched_content" >"$TEMP_DIR/${model}_fetched_content.txt"
+            fi
+
             # Create model-specific context with both search results and fetched content (if any)
             model_context="
 
@@ -374,8 +715,14 @@ $( [ -n "$fetched_content" ] && echo "=== END FETCHED CONTENT ===" )
         enhanced_query="$QUERY"
     fi
 
-    response=$(invoke_model "$model" "$enhanced_query")
+    response=$(invoke_model "$model" "$enhanced_query" "$MAX_TOKENS_STAGE1")
     printf '%s\n' "$response" >"$TEMP_DIR/${model}_response.txt"
+
+    # Track tokens for this model (must be outside subshell)
+    input_tokens=$(estimate_tokens "$enhanced_query")
+    output_tokens=$(estimate_tokens "$response")
+    track_tokens "$model" "$input_tokens" "$output_tokens"
+
     print_model "$label"
     printf '%s\n\n' "$response"
 done
@@ -396,8 +743,14 @@ for reviewer in "${MODEL_IDS[@]}"; do
         reviewee_response=$(cat "$TEMP_DIR/${reviewee}_response.txt")
         review_prompt=$(build_review_prompt "$QUERY" "$reviewee_response")
         echo -e "${BLUE}${reviewer_label} reviewing ${reviewee_label}...${NC}"
-        review=$(invoke_model "$reviewer" "$review_prompt")
+        review=$(invoke_model "$reviewer" "$review_prompt" "$MAX_TOKENS_STAGE2")
         printf '%s\n' "$review" >"$TEMP_DIR/review_${reviewer}_${reviewee}.txt"
+
+        # Track tokens for this review
+        input_tokens=$(estimate_tokens "$review_prompt")
+        output_tokens=$(estimate_tokens "$review")
+        track_tokens "$reviewer" "$input_tokens" "$output_tokens"
+
         print_model "${reviewer_label} → ${reviewee_label}"
         printf '%s\n\n' "$review"
     done
@@ -449,13 +802,21 @@ SYNTH_PROMPT_FILE="$TEMP_DIR/synthesis_prompt.txt"
 
 echo -e "${BLUE}${CHAIRMAN_LABEL} synthesizing final response...${NC}\n"
 SYNTHESIS_PROMPT=$(cat "$SYNTH_PROMPT_FILE")
-FINAL_RESPONSE=$(invoke_model "$CHAIRMAN" "$SYNTHESIS_PROMPT")
+FINAL_RESPONSE=$(invoke_model "$CHAIRMAN" "$SYNTHESIS_PROMPT" "$MAX_TOKENS_STAGE3")
+
+# Track tokens for synthesis
+input_tokens=$(estimate_tokens "$SYNTHESIS_PROMPT")
+output_tokens=$(estimate_tokens "$FINAL_RESPONSE")
+track_tokens "$CHAIRMAN" "$input_tokens" "$output_tokens"
 
 echo -e "${BOLD}${GREEN}╔════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${BOLD}${GREEN}║                      FINAL ANSWER                              ║${NC}"
 echo -e "${BOLD}${GREEN}╚════════════════════════════════════════════════════════════════╝${NC}\n"
 
 printf '%s\n\n' "$FINAL_RESPONSE"
+
+# Display token usage report
+print_token_report
 
 print_header "COUNCIL SESSION COMPLETE"
 
@@ -474,9 +835,16 @@ echo "  • Council Members: $COUNCIL_SUMMARY"
 echo "  • Chairman: $CHAIRMAN_LABEL"
 if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = true ]; then
     echo "  • Web Research: Enabled - Each model performed independent research (via ${WEBSEARCH_URL})"
+    echo "  • Research Depth: Fetching up to ${FETCH_URL_RESULTS} URLs with ${FETCH_URL_MAX_CHARS} chars each"
 else
     echo "  • Web Research: Disabled or unavailable"
 fi
 echo "  • Stages Completed: Independent Research → Response Collection → Peer Review → Synthesis"
 echo "  • Responses saved in: $TEMP_DIR"
+echo ""
+
+# Save session documentation
+echo -e "${BLUE}Saving session documentation...${NC}"
+SESSION_FILE=$(save_session_documentation)
+echo -e "${GREEN}✓ Session saved to: ${SESSION_FILE}${NC}"
 echo ""
