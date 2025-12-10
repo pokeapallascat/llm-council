@@ -19,7 +19,7 @@ BOLD='\033[1m'
 # Default configuration (overridable via env vars)
 OPENAI_MODEL=${OPENAI_MODEL:-"gpt-5.1"}
 CLAUDE_MODEL=${CLAUDE_MODEL:-"sonnet"}
-GEMINI_MODEL=${GEMINI_MODEL:-"gemini-2.0-flash-exp"}
+GEMINI_MODEL=${GEMINI_MODEL:-"gemini-2.5-pro"}
 MODEL_IDS=("openai" "claude" "gemini")
 CHAIRMAN=${CHAIRMAN:-"openai"}
 OPENAI_TOOL=""
@@ -135,10 +135,23 @@ track_tokens() {
 # ============================================================================
 
 # Sanitize question for use as filename
-sanitize_filename() {
-    local text="$1"
-    # Convert to lowercase, replace spaces/special chars with underscores, limit length
-    echo "$text" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | cut -c1-80 | sed 's/_$//'
+# Generate a short descriptive title using Codex (max 20 chars)
+generate_short_title() {
+    local query="$1"
+    local title_prompt="Summarize this question into a short file title (max 20 characters, lowercase, use underscores instead of spaces, no special characters). Only respond with the title, nothing else.
+
+Question: $query"
+
+    # Call Codex with minimal tokens for quick response
+    local short_title
+    short_title=$(run_openai "$title_prompt" "low" "50" 2>/dev/null | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_]/_/g' | sed 's/__*/_/g' | sed 's/^_//;s/_$//' | cut -c1-20)
+
+    # Fallback if Codex fails or returns empty
+    if [ -z "$short_title" ]; then
+        short_title=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/_/g' | sed 's/__*/_/g' | cut -c1-20 | sed 's/_$//')
+    fi
+
+    echo "$short_title"
 }
 
 # Save complete session documentation
@@ -146,11 +159,39 @@ save_session_documentation() {
     local sessions_dir="council_sessions"
     mkdir -p "$sessions_dir"
 
-    local timestamp
-    timestamp=$(date +"%Y-%m-%d_%H-%M-%S")
-    local sanitized_query
-    sanitized_query=$(sanitize_filename "$QUERY")
-    local filename="${sessions_dir}/${timestamp}_${sanitized_query}.md"
+    # Generate short descriptive title using Codex
+    local date_only
+    date_only=$(date +"%Y-%m-%d")
+    local short_title
+    short_title=$(generate_short_title "$QUERY")
+
+    # Check for existing files with same date and title to determine version
+    local base_pattern="${date_only}_${short_title}"
+    local version=""
+    local version_num=1
+
+    # Find highest existing version
+    for existing_file in "${sessions_dir}/"*"${base_pattern}.md"; do
+        if [ -f "$existing_file" ]; then
+            # Check if it's a versioned file (v2_, v3_, etc.)
+            if [[ "$(basename "$existing_file")" =~ ^v([0-9]+)_ ]]; then
+                local found_version="${BASH_REMATCH[1]}"
+                if [ "$found_version" -ge "$version_num" ]; then
+                    version_num=$((found_version + 1))
+                fi
+            else
+                # Found unversioned file, next should be v2
+                version_num=2
+            fi
+        fi
+    done
+
+    # Add version prefix if this is a repeat run
+    if [ "$version_num" -gt 1 ]; then
+        version="v${version_num}_"
+    fi
+
+    local filename="${sessions_dir}/${version}${date_only}_${short_title}.md"
 
     {
         echo "# Council Session: $QUERY"
@@ -403,9 +444,15 @@ run_openai() {
     local prompt="$1"
     local reasoning="${2:-high}"  # Default to high reasoning since codex is chairman
     local max_tokens="${3:-}"     # Optional max_tokens for OpenAI/Codex
+    # Clamp reasoning to supported values for gpt-5.x to avoid 400 errors
+    case "$reasoning" in
+        none|low|medium|high) ;;
+        *) reasoning="high" ;;
+    esac
 
     if [ "$OPENAI_TOOL" = "openai" ]; then
         local payload
+        local errfile="$TEMP_DIR/openai_err.log"
         if [ -n "$max_tokens" ]; then
             payload=$(jq -cn --arg prompt "$prompt" --argjson max_tokens "$max_tokens" \
                 '{messages:[{role:"user",content:$prompt}], max_tokens: $max_tokens}')
@@ -413,33 +460,123 @@ run_openai() {
             payload=$(jq -cn --arg prompt "$prompt" \
                 '{messages:[{role:"user",content:$prompt}]}')
         fi
-        openai api chat.completions.create -m "$OPENAI_MODEL" -g "$payload" \
-            | jq -r '.choices[0].message.content // ""'
-    else
-        # codex uses config file for other settings; honor max_tokens if provided
-        if [ -n "$max_tokens" ]; then
-            codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning" -c max_tokens="$max_tokens"
-        else
-            codex exec "$prompt" -c model="$OPENAI_MODEL" -c reasoning_effort="$reasoning"
+        local raw
+        if ! raw=$(openai api chat.completions.create -m "$OPENAI_MODEL" -g "$payload" 2>"$errfile"); then
+            echo "OpenAI CLI failed: $(cat "$errfile")" >&2
+            return 1
         fi
+        local content
+        content=$(printf '%s' "$raw" | jq -r '.choices[0].message.content // ""' 2>/dev/null || true)
+        if [ -z "$(echo "$content" | tr -d '[:space:]')" ]; then
+            echo "OpenAI returned empty output" >&2
+            return 1
+        fi
+        printf '%s\n' "$content"
+    else
+        # codex CLI path: capture reply via output-last-message with stdout fallback and surface errors
+        local tmp_out errfile raw content
+        tmp_out=$(mktemp "${TEMP_DIR}/openai_codex_XXXXXX")
+        errfile="$TEMP_DIR/openai_err.log"
+
+        local args=(
+            -c model="$OPENAI_MODEL"
+            -c reasoning_effort="$reasoning"
+            --skip-git-repo-check
+            -s read-only
+            --color never
+            --output-last-message "$tmp_out"
+        )
+        if [ -n "$max_tokens" ]; then
+            args+=(-c "max_output_tokens=$max_tokens")
+        fi
+
+        if ! raw=$(codex exec "$prompt" "${args[@]}" 2>"$errfile"); then
+            echo "Codex failed: $(cat "$errfile")" >&2
+            rm -f "$tmp_out"
+            return 1
+        fi
+
+        # Prefer the output-last-message file if it has content
+        if [ -s "$tmp_out" ]; then
+            content=$(cat "$tmp_out")
+        else
+            # Fallback: extract response from stdout by taking everything after the last occurrence
+            # of common codex CLI output patterns (session info, thinking, tokens used, etc.)
+            # The actual response typically appears after these verbose lines
+            content=$(echo "$raw" | awk '
+                /^[a-zA-Z0-9_-]+$/ { next }
+                /^(workdir|model|provider|approval|sandbox|reasoning|session id):/ { next }
+                /^thinking$/ { next }
+                /^tokens used$/ { next }
+                /^[0-9,]+$/ { next }
+                /^--------$/ { next }
+                /^OpenAI Codex/ { next }
+                { print }
+            ')
+        fi
+        rm -f "$tmp_out"
+
+        if [ -z "$(printf '%s' "$content" | tr -d '[:space:]')" ]; then
+            echo "Codex returned empty output (no text in last-message file or stdout)" >&2
+            return 1
+        fi
+        printf '%s\n' "$content"
     fi
 }
 
 run_claude() {
     local prompt="$1"
-    # Claude CLI will use MCP tools (e.g. web-search) if configured in its mcp.json
+    local constrained_prompt="You are one member of a terminal LLM council providing expert analysis and responses.
+
+CRITICAL INSTRUCTIONS:
+- You MAY use available MCP tools (web search, etc.) when helpful for research.
+- You MUST provide complete, direct answers - do NOT ask for permission or say \"Would you like me to...\"
+- Do NOT stay at a meta-level describing what you would do - actually do it and show the result.
+- If asked to create content (prompts, code, documentation), provide the complete content directly in your response.
+- Do NOT say you need permission to write files - instead, present the complete content that should be written.
+- Your response will be reviewed by other models, so make it substantive and complete.
+
+User request:
+${prompt}"
+
     # Note: --max-tokens not reliably supported across all versions
-    printf '%s' "$prompt" | claude --print --output-format text --model "$CLAUDE_MODEL"
+    printf '%s' "$constrained_prompt" | claude --print --output-format text --model "$CLAUDE_MODEL"
 }
 
 run_gemini() {
     local prompt="$1"
-    # Gemini CLI - using model defaults for max tokens
-    if [ "$GEMINI_MODEL" = "gemini-2.0-flash-exp" ]; then
-        printf '%s' "$prompt" | gemini --output-format text
-    else
-        printf '%s' "$prompt" | gemini --model "$GEMINI_MODEL" --output-format text
+    local constrained_prompt="You are one member of a terminal LLM council, running in a non-interactive, text-only script.
+
+CRITICAL CONSTRAINTS:
+- You have NO access to tools, MCP servers, shell commands, or the filesystem.
+- Do NOT say you will use tools like read_file, write_file, replace, apply_patch, run_shell_command, or similar.
+- Do NOT narrate steps like \"I will now run a command\" or \"I will use tool X\".
+- If changes to files are needed, describe the exact edits or final file contents in plain language for a human to apply.
+
+Always respond with a single, self-contained markdown answer addressed to a human operator.
+
+User request:
+${prompt}"
+
+    local errfile="$TEMP_DIR/gemini_err.log"
+
+    # Use positional prompt form to match Gemini CLI non-interactive contract; keep plain-text output.
+    local out
+    if ! out=$(gemini --output-format text --model "$GEMINI_MODEL" "$constrained_prompt" 2>"$errfile"); then
+        echo "Gemini failed: $(cat "$errfile")" >&2
+        return 1
     fi
+
+    # Strip ANSI/control codes before checking emptiness to catch control-only output.
+    local clean_out
+    clean_out=$(printf '%s' "$out" | perl -pe 's/\e\[[0-?]*[ -\/]*[@-~]//g')
+
+    if [ -z "$(printf '%s' "$clean_out" | tr -d '[:space:]')" ]; then
+        echo "Gemini returned empty output" >&2
+        return 1
+    fi
+
+    printf '%s\n' "$clean_out"
 }
 
 invoke_model() {

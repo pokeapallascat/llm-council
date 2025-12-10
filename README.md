@@ -23,6 +23,8 @@ You need these CLI tools **already set up with your existing subscriptions**:
 - `claude` - [Anthropic Claude CLI](https://docs.anthropic.com/claude/docs/claude-cli) (uses your Anthropic API key)
 - `openai` or `codex` - [OpenAI CLI](https://github.com/openai/openai-python) (uses your OpenAI API key)
 
+> **Codex CLI note:** If you use `codex` instead of `openai`, make sure your Codex CLI profile is set to a supported mode (e.g., model `gpt-5.1` with reasoning `high`, not `xhigh`). Misconfigured reasoning values can crash the council run with “unsupported reasoning.effort” errors.
+
 Plus standard tools:
 - `jq` - JSON processor
 - `curl` - HTTP client
@@ -155,7 +157,7 @@ After each council session completes, a **Token Usage Report** is displayed show
 Per-Model Token Usage:
   Codex CLI (gpt-5.1)         Input: xxx  Output: xxx  Total: xxx
   Claude CLI (sonnet)         Input: xxx  Output: xxx  Total: xxx
-  Gemini CLI (2.0 Flash)      Input: xxx  Output: xxx  Total: xxx
+  Gemini CLI (2.5 Pro)        Input: xxx  Output: xxx  Total: xxx
 
 Overall Token Usage:
   Grand Total: xxx tokens
@@ -178,13 +180,20 @@ Every council session is **automatically saved** to a markdown file in the `coun
 
 **File naming format:**
 ```
-council_sessions/YYYY-MM-DD_HH-MM-SS_sanitized_question.md
+council_sessions/YYYY-MM-DD_short_title.md
+council_sessions/vX_YYYY-MM-DD_short_title.md  (for repeated queries)
 ```
 
-**Example:**
+**Examples:**
 ```
-council_sessions/2025-12-03_14-30-45_what_are_the_latest_developments_in_ai.md
+council_sessions/2025-12-10_quantum_computing.md
+council_sessions/v2_2025-12-10_quantum_computing.md  (second run same day)
 ```
+
+**How it works:**
+- Session titles are AI-generated (concise, ~20 characters, descriptive)
+- Version tracking prevents overwriting previous sessions
+- First run gets no version prefix, subsequent runs get `v2_`, `v3_`, etc.
 
 This allows you to:
 - Review past council sessions and research
@@ -208,7 +217,7 @@ CHAIRMAN="openai"
 # Model details
 OPENAI_MODEL="gpt-5.1"
 CLAUDE_MODEL="sonnet"
-GEMINI_MODEL="gemini-2.0-flash-exp"
+GEMINI_MODEL="gemini-2.5-pro"
 ```
 
 ### Web Search Settings
@@ -253,7 +262,7 @@ ENABLE_WEB_SEARCH=false ai_council "search for something"
 - **Models:**
   - OpenAI GPT-5.1 (via codex CLI) - **High reasoning effort** for all stages
   - Anthropic Claude Sonnet
-  - Google Gemini 2.0 Flash Experimental
+  - Google Gemini 2.5 Pro
 - **Web Search:** Enhanced fork of [open-webSearch](https://github.com/Aas-ee/open-webSearch) with [mrkrsl/web-search-mcp](https://github.com/mrkrsl/web-search-mcp) features
   - Multi-engine search (DuckDuckGo, Brave, Bing, etc.)
   - Smart content extraction with Playwright fallback for JS-heavy sites
@@ -291,7 +300,7 @@ Stage 3: Chairman Synthesis
   └─ Final answer combining best insights
     ↓
 Session Documentation
-  └─ Saved to council_sessions/YYYY-MM-DD_HH-MM-SS_question.md
+  └─ Saved to council_sessions/YYYY-MM-DD_short_title.md
 ```
 
 ### Web Search Flow (Per Model)
