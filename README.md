@@ -173,7 +173,7 @@ Each model independently:
 
 This **per-model query planning** ensures research diversity—different models may prioritize different information goals based on their reasoning approach.
 
-### Token Usage Tracking (NEW)
+### Token Usage Tracking 
 
 After each council session completes, a **Token Usage Report** is displayed showing estimated token consumption per model and overall totals. This helps you track API usage and costs.
 
@@ -190,7 +190,7 @@ Overall Token Usage:
 
 **Note:** Token counts are **estimated** based on character count (1 token ≈ 4 chars). Actual usage varies by model's tokenizer.
 
-### Session Documentation (NEW)
+### Session Documentation 
 
 Every council session is **automatically saved** to a markdown file in the `council_sessions/` directory. Each session file includes:
 
@@ -389,18 +389,6 @@ Session Documentation
          └──────┬───────┘
                 ▼
     terminal_council_with_websearch.sh
-```
-
-## Web UI (Optional, Archived)
-
-A web-based implementation exists but is **optional and archived**. The main development focus is on terminal scripts.
-
-The archived web UI (FastAPI + React + OpenRouter) provides a browser-based interface with conversation history and tab-based stage viewing. It's preserved in the `archive/web-ui` branch.
-
-To use the archived web UI:
-```bash
-git checkout archive/web-ui
-# Follow instructions in ARCHIVE_README.md
 ```
 
 ## Performance
