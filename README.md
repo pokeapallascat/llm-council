@@ -14,6 +14,15 @@ In a bit more detail, here is what happens when you submit a query:
 
 This project was 99% vibe coded. The codebase has evolved to focus on terminal-first workflows with integrated web search capabilities. Vibe coded with Claude Code, reviewed and optimized by Codex (GPT-5.1).
 
+## System Requirements
+
+- **Bash 3.2+** (macOS default Bash 3.2.57 works perfectly)
+- **jq** - JSON processor
+- **curl** - HTTP client
+- **Node.js 18+** (for web search server)
+
+**macOS Compatibility:** The terminal council script uses Bash 3.2-compatible patterns (string-based URL deduplication, `while read` loops instead of `mapfile`) to work seamlessly with macOS's default shell without requiring Homebrew installations.
+
 ## Quick Start
 
 ### 1. Install and Authenticate CLI Tools
@@ -58,39 +67,41 @@ source ~/.zshrc  # or ~/.bashrc
 
 ### 3. Set Up Web Search Server (Required for Web Research)
 
-**Important:** The `open-webSearch` directory **must be present** for web research features to work. It's already included in this repository.
+The council uses Docker to run the web search server with full content extraction capabilities (including Playwright browsers for JavaScript-heavy sites).
 
-#### One-Time Setup
+#### Prerequisites
 
-Run these commands **once** to install dependencies:
+- **Docker Desktop** installed and running ([Get Docker](https://www.docker.com/products/docker-desktop))
+- The `open-webSearch` directory must be present (already included in this repo)
 
-```bash
-cd open-webSearch
-npm install
-npx playwright install chromium firefox
-npm run build
-cd ..
-```
-
-#### Starting the Server
+#### Starting the Web Search Server
 
 **Open a new terminal window/tab** and run:
 
 ```bash
-cd /Users/your_username/ai_Council/open-webSearch
-npm start
+cd open-webSearch
+docker-compose -f docker-compose.enhanced.yml up -d
 ```
 
-You'll see:
-```
-✅ HTTP server running on port 3000
+This will:
+- Build the enhanced Docker image with Chromium and Firefox browsers (~1.5GB)
+- Start the server on `http://localhost:3000`
+- Run in detached mode (background)
+
+**Check server status:**
+```bash
+docker-compose -f docker-compose.enhanced.yml ps
 ```
 
-**Keep this terminal window open.** Don't close it or press Ctrl+C while using the council.
+You should see:
+```
+NAME                      STATUS         PORTS
+open-websearch-enhanced   Up X minutes   0.0.0.0:3000->3000/tcp
+```
 
 #### Using the Council (in your main terminal)
 
-Now in your **main terminal** (not the one running the server), you can run council queries:
+Now in your **main terminal** (not the one where you started Docker), you can run council queries:
 
 ```bash
 ai_council "what are the latest breakthroughs in quantum computing?"
@@ -100,14 +111,23 @@ The council will automatically use the web search server when needed. You can ru
 
 #### Stopping the Server
 
-When you're completely done, you can stop the server in two ways:
+When you're done:
 
-**Option 1:** In the terminal window running the server, press **Ctrl+C**
-
-**Option 2:** From any terminal, run:
 ```bash
-pkill -f "node build/index.js"
+cd open-webSearch
+docker-compose -f docker-compose.enhanced.yml down
 ```
+
+This stops and removes the container (but keeps the built image for faster next startup).
+
+#### First-Time Build Note
+
+The first time you run `docker-compose up`, it will:
+- Build the Docker image (3-5 minutes)
+- Install Playwright browsers inside the container
+- Start the server
+
+Subsequent starts are much faster (~10 seconds) since the image is already built.
 
 #### Running Without Web Search
 
@@ -143,10 +163,15 @@ ai_council "what are the latest developments in quantum computing?"
 ai_council "find news about Bitcoin on December 1st 2025"
 ```
 
+If your question contains explicit URLs (e.g., `https://example.com/docs`), the council will first try to fetch those URLs directly via the web-search server and prepend their content to each model’s context before running any additional search.
+
 Each model independently:
-1. Performs its own web search (5 results)
-2. Fetches actual webpage content from top 5 URLs (~40,000 characters of real content - 8,000 chars per URL)
-3. Forms responses based on unique research data
+1. **Formulates its own search queries** (typically 3-5 focused queries per model)
+2. Performs web searches (3 results per query, deduplicated to ~9-12 unique URLs)
+3. Fetches actual webpage content from top 5 URLs (~40,000 characters of real content - 8,000 chars per URL)
+4. Forms responses based on unique research data
+
+This **per-model query planning** ensures research diversity—different models may prioritize different information goals based on their reasoning approach.
 
 ### Token Usage Tracking (NEW)
 
@@ -191,7 +216,8 @@ council_sessions/v2_2025-12-10_quantum_computing.md  (second run same day)
 ```
 
 **How it works:**
-- Session titles are AI-generated (concise, ~20 characters, descriptive)
+- Session titles are AI-generated by default (concise, ~20 characters, descriptive)
+- Set `COUNCIL_AI_TITLES=false` to use sanitized query text instead (faster, no AI call)
 - Version tracking prevents overwriting previous sessions
 - First run gets no version prefix, subsequent runs get `v2_`, `v3_`, etc.
 
@@ -239,9 +265,38 @@ FETCH_URL_MAX_CHARS=8000                        # Max chars per URL (default: 80
 MAX_TOKENS_STAGE1=4000                          # Stage 1: Initial responses (detailed)
 MAX_TOKENS_STAGE2=500                           # Stage 2: Peer reviews (concise)
 MAX_TOKENS_STAGE3=6000                          # Stage 3: Final synthesis (comprehensive)
+
+# Timeouts & debugging
+MODEL_TIMEOUT_SECONDS=45                        # Max seconds per model call (uses `timeout` if available)
+WEB_SEARCH_TIMEOUT=20                           # Max seconds for /api/search and /api/fetchUrl calls
+COUNCIL_DEBUG=true                              # Enable verbose debug logs for planning/search stages
 ```
 
 **Note:** MAX_TOKENS settings are enforced for OpenAI/Codex (via the OpenAI CLI or Codex CLI) and treated as best-effort hints for other CLIs, which may still use their own defaults.
+
+### Security & Privacy Settings
+
+Control what data is logged and where web searches are allowed:
+
+```bash
+# External web search control (default: false - fail-closed for security)
+COUNCIL_ALLOW_EXTERNAL_WEBSEARCH="false"    # Allow non-localhost web search endpoints
+
+# Session logging control (default: true)
+COUNCIL_SAVE_SESSION="true"                 # Save session markdown files to council_sessions/
+
+# Email redaction in session logs (default: false)
+COUNCIL_REDACT_EMAILS="false"               # Replace email addresses with [EMAIL_REDACTED]
+
+# AI-generated session titles (default: true)
+COUNCIL_AI_TITLES="true"                    # Use AI to generate session filenames (vs sanitized query)
+```
+
+**Security & Privacy Notes:**
+- **`COUNCIL_ALLOW_EXTERNAL_WEBSEARCH`**: ⚠️  By default, the council only allows localhost web search servers (http://localhost:3000 or http://127.0.0.1:3000). Set to `true` to allow external endpoints, but be aware this may send your queries to third-party services.
+- **`COUNCIL_SAVE_SESSION`**: Set to `false` for ephemeral sessions with no disk persistence—useful for sensitive queries that you don't want logged.
+- **`COUNCIL_REDACT_EMAILS`**: Enable email redaction in session logs to protect privacy. The council also automatically redacts API keys, tokens, database URIs, and private keys.
+- **`COUNCIL_AI_TITLES`**: Set to `false` to skip AI title generation (saves ~1-2 seconds and ~100 tokens per session). Falls back to sanitized query text for filenames.
 
 ### Custom Execution
 
@@ -258,7 +313,7 @@ ENABLE_WEB_SEARCH=false ai_council "search for something"
 
 ## Tech Stack
 
-- **Core:** Bash scripts orchestrating local CLI tools
+- **Core:** Bash 3.2+ scripts orchestrating local CLI tools (macOS-compatible without Homebrew)
 - **Models:**
   - OpenAI GPT-5.1 (via codex CLI) - **High reasoning effort** for all stages
   - Anthropic Claude Sonnet
@@ -267,9 +322,11 @@ ENABLE_WEB_SEARCH=false ai_council "search for something"
   - Multi-engine search (DuckDuckGo, Brave, Bing, etc.)
   - Smart content extraction with Playwright fallback for JS-heavy sites
   - Dual transport: MCP (STDIO/HTTP) + REST API
+  - Per-model query planning: each model formulates independent search queries
 - **Token Tracking:** Automatic estimation and per-model reporting (Bash 3.2 compatible)
 - **Session Documentation:** Automatic markdown file generation with full context and research data
 - **Storage:** Session files saved to `council_sessions/`, temporary files cleaned up after each run
+- **Compatibility:** String-based URL deduplication, `while read` loops, and other Bash 3.2-compatible patterns for maximum portability
 
 ## Documentation
 
@@ -288,9 +345,9 @@ ENABLE_WEB_SEARCH=false ai_council "search for something"
 User Query
     ↓
 Stage 1: Independent Research + Response Collection
-  ├─ Model 1: web search → fetch URLs → respond
-  ├─ Model 2: web search → fetch URLs → respond
-  └─ Model 3: web search → fetch URLs → respond
+  ├─ Model 1: formulate queries → search → deduplicate → fetch URLs → respond
+  ├─ Model 2: formulate queries → search → deduplicate → fetch URLs → respond
+  └─ Model 3: formulate queries → search → deduplicate → fetch URLs → respond
     ↓
 Stage 2: Peer Review (anonymized)
   ├─ Each model reviews others' responses
@@ -348,10 +405,18 @@ git checkout archive/web-ui
 
 ## Performance
 
+**Phase 3 Optimizations (December 2025):**
+The council now uses parallel execution for all models in Stage 1 and Stage 2, achieving **3x faster** end-to-end performance compared to sequential execution.
+
 **With Web Search Enabled:**
 - **Content Fetched**: ~120,000 chars total (3 models × 5 URLs × 8,000 chars each)
 - **Token Usage**: Estimated 15,000-20,000 tokens per session (varies by question complexity)
-- **Speed**: 30-60 seconds per model for Stage 1 (search + fetch + analysis)
+- **Speed**:
+  - Stage 1: ~20 seconds (3 models in parallel doing search + fetch + analysis)
+  - Stage 2: ~8 seconds (6 peer reviews in parallel)
+  - Stage 3: ~12 seconds (chairman synthesis)
+  - **Total: ~40-50 seconds end-to-end** ⚡
+- **Speedup**: 3x faster than sequential execution (was ~120 seconds)
 - **Cost Considerations**:
   - Keyword detection = zero API cost for routing
   - Codex uses HIGH reasoning effort for deeper analysis (chairman role)
@@ -360,10 +425,13 @@ git checkout archive/web-ui
 
 **Without Web Search (Basic Mode):**
 - **Token Usage**: Estimated 6,000-8,000 tokens per session
-- **Speed**: 10-20 seconds per model (no web fetching)
+- **Speed**: ~20-30 seconds total (all stages parallelized)
 - **Best for**: Conceptual questions, explanations, comparisons that don't need current data
+- **Fast Mode**: Set `COUNCIL_AI_TITLES=false` to skip AI title generation (saves 1-2s + ~100 tokens)
 
 ## Examples
+
+### Basic Usage
 
 ```bash
 # Research query with automatic web search
@@ -380,6 +448,63 @@ ai_council "explain the differences between transformers and RNNs"
 
 # Custom configuration
 FETCH_URL_RESULTS=3 ai_council "latest developments in AI safety"
+```
+
+### Advanced Usage
+
+**Privacy-Focused Mode:**
+```bash
+# Ephemeral session - nothing written to disk
+COUNCIL_SAVE_SESSION=false ai_council "Help me draft a sensitive email to a client"
+
+# Session with email/secret redaction enabled
+COUNCIL_REDACT_EMAILS=true ai_council "Analyze this email thread about our product launch"
+
+# Combined privacy mode (no logging + redaction)
+COUNCIL_SAVE_SESSION=false \
+COUNCIL_REDACT_EMAILS=true \
+  ai_council "Sensitive question here"
+```
+
+**Fast Mode (Minimal Latency):**
+```bash
+# Skip AI title generation + disable web search
+COUNCIL_AI_TITLES=false \
+ENABLE_WEB_SEARCH=false \
+  ai_council "Explain the visitor pattern in software design"
+# Result: ~15-20 seconds total (vs ~40-50s with web search)
+
+# Fast mode with deep responses (no web, no title, higher token limits)
+COUNCIL_AI_TITLES=false \
+ENABLE_WEB_SEARCH=false \
+MAX_TOKENS_STAGE1=8000 \
+MAX_TOKENS_STAGE3=12000 \
+  ai_council "Detailed explanation of distributed consensus algorithms"
+```
+
+**External Web Search (Advanced):**
+```bash
+# ⚠️  Allow external web search endpoint (e.g., hosted search API)
+COUNCIL_ALLOW_EXTERNAL_WEBSEARCH=true \
+WEBSEARCH_URL="https://search.example.com" \
+  ai_council "latest AI research papers"
+# Warning: Your queries will be sent to the external service
+```
+
+**Combined Use Cases:**
+```bash
+# Quick ephemeral session with no web search
+COUNCIL_SAVE_SESSION=false \
+COUNCIL_AI_TITLES=false \
+ENABLE_WEB_SEARCH=false \
+  ai_council "Quick conceptual question here"
+# Result: Fastest possible mode (~15-20s), no disk writes
+
+# Privacy-focused research (logs + redaction + localhost-only web search)
+COUNCIL_REDACT_EMAILS=true \
+COUNCIL_ALLOW_EXTERNAL_WEBSEARCH=false \
+  ai_council "search for information about my company"
+# Result: Web search allowed, but only to localhost:3000, emails redacted in logs
 ```
 
 ## Contributing
