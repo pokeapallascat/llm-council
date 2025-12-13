@@ -58,6 +58,15 @@ MAX_TOKENS_STAGE3=${MAX_TOKENS_STAGE3:-6000}        # Final synthesis (comprehen
 
 # Performance & optional features
 COUNCIL_AI_TITLES=${COUNCIL_AI_TITLES:-"true"}      # Use AI to generate session filenames (false = use deterministic sanitized query)
+CHAIRMAN_WEB_SEARCH=${CHAIRMAN_WEB_SEARCH:-"false"} # Allow chairman to perform fact-checking web searches before synthesis (adds latency)
+
+# Magic number constants (extracted for maintainability)
+SEARCH_RESULTS_PER_QUERY=3           # Number of search results to fetch per query
+PLANNING_MAX_TOKENS=500              # Max tokens for query planning prompts
+TITLE_MAX_CHARS=20                   # Max characters for session title
+TITLE_GENERATION_MAX_TOKENS=50       # Max tokens for AI title generation
+MIN_TOKENS_STAGE2=50                 # Minimum tokens allowed for Stage 2
+MAX_SEARCH_QUERIES=5                 # Maximum search queries to generate per model
 
 # Token tracking (bash 3.2 compatible - using separate variables per model)
 OPENAI_INPUT_TOKENS=0
@@ -71,6 +80,9 @@ GEMINI_OUTPUT_TOKENS=0
 GEMINI_TOTAL_TOKENS=0
 TOTAL_INPUT_TOKENS=0
 TOTAL_OUTPUT_TOKENS=0
+
+# Current date for model context (helps models understand "today", "this week", etc.)
+CURRENT_DATE=$(date +%Y-%m-%d)
 
 # Temporary directory for responses
 TEMP_DIR=$(mktemp -d)
@@ -182,26 +194,28 @@ generate_short_title() {
 
     # Check if AI title generation is enabled (performance optimization)
     if [ "${COUNCIL_AI_TITLES:-true}" = "true" ]; then
-        local title_prompt="Summarize this question into a short file title (max 20 characters, lowercase, use underscores instead of spaces, no special characters). Only respond with the title, nothing else.
+        local title_prompt="Summarize this question into a short file title (max ${TITLE_MAX_CHARS} characters, lowercase, use underscores instead of spaces, no special characters). Only respond with the title, nothing else.
 
 Question: $query"
 
         # Call Codex with minimal tokens for quick response
         # Capture in failure-tolerant step to prevent strict-mode pipeline abort
         local raw_title
-        raw_title=$(run_openai "$title_prompt" "low" "50" 2>/dev/null || true)
+        raw_title=$(run_openai "$title_prompt" "low" "$TITLE_GENERATION_MAX_TOKENS" 2>/dev/null || true)
 
         # Process if we got a response
         if [ -n "$raw_title" ]; then
             # Performance: combine sed passes into single invocation
-            short_title=$(echo "$raw_title" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_]/_/g' -e 's/__*/_/g' -e 's/^_//;s/_$//' | cut -c1-20)
+            # Make entire pipeline failure-tolerant to prevent strict-mode abort
+            short_title=$(echo "$raw_title" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9_]/_/g' -e 's/__*/_/g' -e 's/^_//;s/_$//' | cut -c1-${TITLE_MAX_CHARS} || true)
         fi
     fi
 
     # Fallback: use deterministic sanitized query if AI disabled or failed
     if [ -z "$short_title" ]; then
         # Performance: combine sed passes into single invocation
-        short_title=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]/_/g' -e 's/__*/_/g' -e 's/_$//' | cut -c1-20)
+        # Make pipeline failure-tolerant
+        short_title=$(echo "$query" | tr '[:upper:]' '[:lower:]' | sed -e 's/[^a-z0-9]/_/g' -e 's/__*/_/g' -e 's/_$//' | cut -c1-${TITLE_MAX_CHARS} || true)
     fi
 
     echo "$short_title"
@@ -219,7 +233,6 @@ save_session_documentation() {
     short_title=$(generate_short_title "$QUERY")
 
     # Atomically allocate session filename using noclobber (prevents race conditions)
-    local base_pattern="${date_only}_${short_title}"
     local version=""
     local version_num=1
     local filename
@@ -467,41 +480,36 @@ web_search_json() {
 }
 
 # Fetch content from a specific URL
+# Fetch URL content with optional length limit
+# Usage: fetch_url_content URL [MAX_LENGTH]
+# If MAX_LENGTH is omitted, no truncation is applied
 fetch_url_content() {
     local url="$1"
+    local max_len="${2:-}"
     local payload
 
-    payload=$(jq -nc --arg url "$url" '{url: $url, useBrowserFallback: true}')
+    if [ -n "$max_len" ]; then
+        payload=$(jq -nc --arg url "$url" --argjson maxLen "$max_len" '{url: $url, useBrowserFallback: true, maxContentLength: $maxLen}')
+        debug_log "fetch_url_content: url=\"$url\" maxLen=$max_len"
+    else
+        payload=$(jq -nc --arg url "$url" '{url: $url, useBrowserFallback: true}')
+        debug_log "fetch_url_content: url=\"$url\""
+    fi
 
-    debug_log "fetch_url_content: url=\"$url\""
     run_with_timeout "$WEB_SEARCH_TIMEOUT" curl -s -X POST "${WEBSEARCH_URL}/api/fetchUrl" \
         -H "Content-Type: application/json" \
         -d "$payload" \
         | jq -r '.content' 2>/dev/null || echo ""
 }
 
-# Fetch content with truncation
-fetch_url_content_limited() {
-    local url="$1"
-    local payload
-
-    payload=$(jq -nc --arg url "$url" --argjson maxLen "$FETCH_URL_MAX_CHARS" '{url: $url, useBrowserFallback: true, maxContentLength: $maxLen}')
-
-    debug_log "fetch_url_content_limited: url=\"$url\" maxLen=$FETCH_URL_MAX_CHARS"
-    run_with_timeout "$WEB_SEARCH_TIMEOUT" curl -s -X POST "${WEBSEARCH_URL}/api/fetchUrl" \
-        -H "Content-Type: application/json" \
-        -d "$payload" \
-        | jq -r '.content' 2>/dev/null || echo ""
-}
-
-# Determine if query needs web search (detects explicit requests or asks GPT-5.1 w/ higher reasoning)
+# Determine if query needs web search (keyword heuristics only)
 needs_web_search() {
     local query="$1"
     local query_lower
     query_lower=$(echo "$query" | tr '[:upper:]' '[:lower:]')
 
-    # Check for explicit search request keywords
-    if [[ "$query_lower" =~ (search|find|look.up|fetch|get.news|latest|current|recent|today|web.search) ]]; then
+    # Check for explicit search/recency keywords
+    if [[ "$query_lower" =~ (search|find|look.up|fetch|get.news|latest|current|recent|today|web.search|this[[:space:]]+week|this[[:space:]]+month|yesterday) ]]; then
         return 0
     fi
 
@@ -514,14 +522,14 @@ needs_web_search() {
 generate_search_queries_for_model() {
     local model="$1"
     local user_query="$2"
-    local max_queries="${3:-5}"
+    local max_queries="${3:-$MAX_SEARCH_QUERIES}"
     local planning_start=$SECONDS
 
     # Planning prompt for the model
     local planning_prompt="You are planning web research to answer this question:
 \"${user_query}\"
 
-Your task is to break this down into 3-${max_queries} focused search queries that will help you gather the information needed.
+Your task is to break this down into ${SEARCH_RESULTS_PER_QUERY}-${max_queries} focused search queries that will help you gather the information needed.
 
 INSTRUCTIONS:
 1. Identify distinct information goals (e.g., product details, team info, market analysis, etc.)
@@ -549,11 +557,11 @@ Now generate your search queries:"
     case "$model" in
         openai)
             # Use low reasoning for planning to avoid preamble and save tokens
-            queries_text=$(run_openai "$planning_prompt" "low" 500 2>/dev/null || echo "")
+            queries_text=$(run_openai "$planning_prompt" "low" "$PLANNING_MAX_TOKENS" 2>/dev/null || echo "")
             ;;
         claude|gemini)
             # Claude and Gemini don't have reasoning levels, use invoke_model
-            queries_text=$(invoke_model "$model" "$planning_prompt" 500 2>/dev/null || echo "")
+            queries_text=$(invoke_model "$model" "$planning_prompt" "$PLANNING_MAX_TOKENS" 2>/dev/null || echo "")
             ;;
         *)
             queries_text=""
@@ -604,13 +612,24 @@ is_safe_url() {
 
     # Extract hostname/IP from URL (handle IPv6 brackets)
     local host
-    host=$(echo "$url" | sed -E 's|^https?://([^:/]+).*|\1|')
+    # IPv6 addresses are wrapped in brackets: http://[::1]:8080
+    # Extract either [ipv6] or hostname/ipv4
+    if [[ "$url" =~ ^https?://\[([^]]+)\] ]]; then
+        # IPv6 address in brackets
+        host="${BASH_REMATCH[1]}"
+    else
+        # IPv4 or hostname
+        host=$(echo "$url" | sed -E 's|^https?://([^:/]+).*|\1|')
+    fi
 
-    # Remove IPv6 brackets if present
-    host=$(echo "$host" | sed -E 's/^\[(.+)\]$/\1/')
+    # Normalize hostname to lowercase for case-insensitive matching
+    host=$(echo "$host" | tr '[:upper:]' '[:lower:]')
 
-    # Block localhost variations
-    if [[ "$host" =~ ^(localhost|127\.|::1|0\.0\.0\.0)$ ]]; then
+    # Block localhost variations (case-insensitive after normalization)
+    if [[ "$host" = "localhost" ]] || \
+       [[ "$host" =~ ^127\. ]] || \
+       [[ "$host" = "::1" ]] || \
+       [[ "$host" = "0.0.0.0" ]]; then
         echo "Blocked: localhost/loopback addresses not allowed" >&2
         return 1
     fi
@@ -657,8 +676,8 @@ is_safe_url() {
         return 1
     fi
 
-    # Block hexadecimal IP notation (e.g., 0x7f000001 = 127.0.0.1)
-    if [[ "$host" =~ ^0x[0-9a-fA-F]+$ ]]; then
+    # Block hexadecimal IP notation (e.g., 0x7f000001 = 127.0.0.1 or 0x7f.0x0.0x0.0x1)
+    if [[ "$host" =~ ^0x[0-9a-f]+$ ]] || [[ "$host" =~ 0x[0-9a-f]+ ]]; then
         echo "Blocked: hexadecimal IP notation not allowed" >&2
         return 1
     fi
@@ -697,8 +716,8 @@ redact_sensitive_data() {
     text=$(echo "$text" | sed -E 's/(password=)[^&[:space:]]+/\1[REDACTED]/gi')
     text=$(echo "$text" | sed -E 's/(passwd=)[^&[:space:]]+/\1[REDACTED]/gi')
 
-    # Redact database connection strings (BSD sed compatible - use | delimiter to avoid @ conflicts)
-    text=$(echo "$text" | sed -E 's|(postgres|mysql|mongodb|redis)://[^:]+:[^@]+@|\1://[REDACTED]:[REDACTED]@|g')
+    # Redact database connection strings (BSD sed compatible - use # delimiter)
+    text=$(echo "$text" | sed -E 's#(postgres|mysql|mongodb|redis)://[^:]+:[^@]+@#\1://[REDACTED]:[REDACTED]@#g')
 
     # Redact secret keys
     text=$(echo "$text" | sed -E 's/(secret[-_]?key=)[^&[:space:]]+/\1[REDACTED]/gi')
@@ -742,8 +761,8 @@ validate_numeric_env_vars() {
     fi
 
     # Validate MAX_TOKENS_STAGE2
-    if ! [[ "$MAX_TOKENS_STAGE2" =~ ^[0-9]+$ ]] || [ "$MAX_TOKENS_STAGE2" -lt 50 ]; then
-        echo -e "${RED}Error:${NC} MAX_TOKENS_STAGE2 must be >= 50 (got: '$MAX_TOKENS_STAGE2')" >&2
+    if ! [[ "$MAX_TOKENS_STAGE2" =~ ^[0-9]+$ ]] || [ "$MAX_TOKENS_STAGE2" -lt "$MIN_TOKENS_STAGE2" ]; then
+        echo -e "${RED}Error:${NC} MAX_TOKENS_STAGE2 must be >= $MIN_TOKENS_STAGE2 (got: '$MAX_TOKENS_STAGE2')" >&2
         ((errors++))
     fi
 
@@ -860,7 +879,7 @@ fetch_explicit_urls() {
         echo -e "${BLUE}  → Fetching explicit URL: $url${NC}" >&2
 
         local content
-        content=$(fetch_url_content_limited "$url")
+        content=$(fetch_url_content "$url" "$FETCH_URL_MAX_CHARS")
 
         if [ -n "$content" ]; then
             ((success_count++))
@@ -1108,6 +1127,8 @@ build_review_prompt() {
     local question="$1"
     local peer_response="$2"
     cat <<EOF
+Current date: $CURRENT_DATE
+
 You are reviewing a peer AI's response to the question:
 "$question"
 
@@ -1317,6 +1338,11 @@ if [ "$ENABLE_WEB_SEARCH_FOR_QUERY" = false ] && check_websearch_server && needs
     echo -e "${CYAN}Web search enabled - each model will perform independent research${NC}\n"
 fi
 
+# Create date context header for all model prompts
+DATE_CONTEXT="Current date: ${CURRENT_DATE}
+
+"
+
 # Run Stage 1 queries in parallel for better performance
 stage1_pids=()
 for model in "${MODEL_IDS[@]}"; do
@@ -1354,7 +1380,7 @@ for model in "${MODEL_IDS[@]}"; do
 
             # Graceful degradation: continue even if search fails
             set +e
-            query_results=$(web_search_json "$query" 3)  # 3 results per query
+            query_results=$(web_search_json "$query" "$SEARCH_RESULTS_PER_QUERY")
             search_exit_code=$?
             set -e
 
@@ -1410,7 +1436,7 @@ Description: ${desc}
 
                     ((fetch_count++))
                     echo -e "${BLUE}    → Fetching: $url${NC}"
-                    content=$(fetch_url_content_limited "$url")
+                    content=$(fetch_url_content "$url" "$FETCH_URL_MAX_CHARS")
                     if [ -n "$content" ]; then
                         fetched_content="${fetched_content}
 
@@ -1462,7 +1488,7 @@ $fetched_content
 $( [ -n "$fetched_content" ] && echo "=== END FETCHED CONTENT ===" )
 
 "
-            enhanced_query="${model_context}${QUERY}"
+            enhanced_query="${DATE_CONTEXT}${model_context}${QUERY}"
         else
             echo -e "${YELLOW}  ⚠ No search results found${NC}"
             # Still include explicit URLs content even if search failed
@@ -1477,9 +1503,9 @@ $EXPLICIT_URLS_CONTENT
 === END EXPLICIT URL CONTENT ===
 
 "
-                enhanced_query="${model_context}${QUERY}"
+                enhanced_query="${DATE_CONTEXT}${model_context}${QUERY}"
             else
-                enhanced_query="$QUERY"
+                enhanced_query="${DATE_CONTEXT}${QUERY}"
             fi
         fi
     else
@@ -1495,9 +1521,9 @@ $EXPLICIT_URLS_CONTENT
 === END EXPLICIT URL CONTENT ===
 
 "
-            enhanced_query="${model_context}${QUERY}"
+            enhanced_query="${DATE_CONTEXT}${model_context}${QUERY}"
         else
-            enhanced_query="$QUERY"
+            enhanced_query="${DATE_CONTEXT}${QUERY}"
         fi
     fi
 
@@ -1594,8 +1620,89 @@ done
 
 print_header "STAGE 3: FINAL SYNTHESIS"
 
+# Optional: Chairman performs fact-checking web searches before synthesis
+CHAIRMAN_FACT_CHECK_CONTENT=""
+if [ "${CHAIRMAN_WEB_SEARCH:-false}" = "true" ] && check_websearch_server; then
+    echo -e "${CYAN}Chairman performing fact-checking web research...${NC}\n"
+
+    # Extract key factual claims to verify from Stage 1 responses
+    fact_check_prompt="Current date: $CURRENT_DATE
+
+Review the following AI responses and identify 2-3 specific factual claims that would benefit from verification via web search.
+Focus on claims about recent events, statistics, dates, or facts that could be out of date or incorrect.
+
+Responses:
+"
+    for model in "${MODEL_IDS[@]}"; do
+        label=$(get_model_label "$model")
+        fact_check_prompt+="
+$label:
+$(cat "$TEMP_DIR/${model}_response.txt" | head -20)
+"
+    done
+
+    fact_check_prompt+="
+
+OUTPUT FORMAT: Return only search queries (one per line), nothing else. Max 3 queries.
+Example:
+Federal Reserve FOMC meeting December 2025
+Latest inflation rate United States 2025"
+
+    # Get fact-checking queries from chairman
+    chairman_queries=""
+    set +e
+    chairman_queries=$(invoke_model "$CHAIRMAN" "$fact_check_prompt" "$PLANNING_MAX_TOKENS" 2>/dev/null)
+    set -e
+
+    if [ -n "$chairman_queries" ]; then
+        echo -e "${BLUE}Identified claims to verify:${NC}"
+        # Parse queries and perform searches
+        chairman_search_results=""
+        query_count=0
+        while IFS= read -r query; do
+            # Skip empty lines and comments
+            query=$(echo "$query" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            [ -z "$query" ] && continue
+            # shellcheck disable=SC2001  # sed used for complex regex, parameter expansion not suitable here
+            [[ "$query" =~ ^[0-9]+\.?[[:space:]]* ]] && query=$(echo "$query" | sed 's/^[0-9]*\.?[[:space:]]*//')
+            [[ "$query" =~ ^# ]] && continue
+
+            ((query_count++))
+            [ $query_count -gt 3 ] && break
+
+            echo -e "${BLUE}  → $query${NC}"
+
+            set +e
+            search_result=$(web_search_json "$query" "$SEARCH_RESULTS_PER_QUERY")
+            set -e
+
+            if [ -n "$search_result" ]; then
+                # Format search results for chairman
+                chairman_search_results+="
+Query: $query
+$(echo "$search_result" | jq -r '.results[] | "- \(.title)\n  URL: \(.url)\n  \(.description)\n"' 2>/dev/null || echo "$search_result")
+"
+            fi
+        done <<< "$chairman_queries"
+
+        if [ -n "$chairman_search_results" ]; then
+            CHAIRMAN_FACT_CHECK_CONTENT="
+
+=== CHAIRMAN FACT-CHECKING RESEARCH ===
+The following web search results were gathered to verify factual claims:
+$chairman_search_results
+=== END FACT-CHECKING RESEARCH ===
+
+"
+            echo -e "${GREEN}✓ Fact-checking research completed${NC}\n"
+        fi
+    fi
+fi
+
 SYNTH_PROMPT_FILE="$TEMP_DIR/synthesis_prompt.txt"
 {
+    echo "Current date: $CURRENT_DATE"
+    echo ""
     echo "You are the Chairman of an AI council."
     echo "Question: $QUERY"
 
@@ -1628,8 +1735,17 @@ SYNTH_PROMPT_FILE="$TEMP_DIR/synthesis_prompt.txt"
         done
         echo ""
     done
+
+    # Add chairman fact-checking research if available
+    if [ -n "$CHAIRMAN_FACT_CHECK_CONTENT" ]; then
+        echo "$CHAIRMAN_FACT_CHECK_CONTENT"
+    fi
+
     echo "Produce a concise but thorough final answer that blends the strongest insights."
     echo "Note consensus, highlight disagreements, and cite which model contributed key points."
+    if [ -n "$CHAIRMAN_FACT_CHECK_CONTENT" ]; then
+        echo "Use the fact-checking research above to verify or correct any claims from council members."
+    fi
 } >"$SYNTH_PROMPT_FILE"
 
 echo -e "${BLUE}${CHAIRMAN_LABEL} synthesizing final response...${NC}\n"

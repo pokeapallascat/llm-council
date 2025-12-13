@@ -20,8 +20,15 @@ This project was 99% vibe coded. The codebase has evolved to focus on terminal-f
 - **jq** - JSON processor
 - **curl** - HTTP client
 - **Node.js 18+** (for web search server)
+- **timeout** (optional, recommended) - Prevents hangs from unresponsive models
 
 **macOS Compatibility:** The terminal council script uses Bash 3.2-compatible patterns (string-based URL deduplication, `while read` loops instead of `mapfile`) to work seamlessly with macOS's default shell without requiring Homebrew installations.
+
+**Timeout Command (Optional):**
+- The script will display a warning on macOS: `'timeout' command not found`
+- This is **expected behavior** - macOS doesn't include GNU `timeout` by default
+- The script works fine without it, but model calls won't have timeout protection
+- To install (optional): `brew install coreutils` (provides `gtimeout`, which the script will use)
 
 ## Quick Start
 
@@ -173,7 +180,7 @@ Each model independently:
 
 This **per-model query planning** ensures research diversity—different models may prioritize different information goals based on their reasoning approach.
 
-### Token Usage Tracking (NEW)
+### Token Usage Tracking 
 
 After each council session completes, a **Token Usage Report** is displayed showing estimated token consumption per model and overall totals. This helps you track API usage and costs.
 
@@ -190,7 +197,7 @@ Overall Token Usage:
 
 **Note:** Token counts are **estimated** based on character count (1 token ≈ 4 chars). Actual usage varies by model's tokenizer.
 
-### Session Documentation (NEW)
+### Session Documentation 
 
 Every council session is **automatically saved** to a markdown file in the `council_sessions/` directory. Each session file includes:
 
@@ -286,10 +293,13 @@ COUNCIL_ALLOW_EXTERNAL_WEBSEARCH="false"    # Allow non-localhost web search end
 COUNCIL_SAVE_SESSION="true"                 # Save session markdown files to council_sessions/
 
 # Email redaction in session logs (default: false)
-COUNCIL_REDACT_EMAILS="false"               # Replace email addresses with [EMAIL_REDACTED]
+COUNCIL_REDACT_EMAILS="false"               # Replace email addresses with [REDACTED_EMAIL]
 
 # AI-generated session titles (default: true)
 COUNCIL_AI_TITLES="true"                    # Use AI to generate session filenames (vs sanitized query)
+
+# Chairman fact-checking (default: false)
+CHAIRMAN_WEB_SEARCH="false"                 # Allow chairman to fact-check claims before synthesis (adds 2-5s)
 ```
 
 **Security & Privacy Notes:**
@@ -297,6 +307,7 @@ COUNCIL_AI_TITLES="true"                    # Use AI to generate session filenam
 - **`COUNCIL_SAVE_SESSION`**: Set to `false` for ephemeral sessions with no disk persistence—useful for sensitive queries that you don't want logged.
 - **`COUNCIL_REDACT_EMAILS`**: Enable email redaction in session logs to protect privacy. The council also automatically redacts API keys, tokens, database URIs, and private keys.
 - **`COUNCIL_AI_TITLES`**: Set to `false` to skip AI title generation (saves ~1-2 seconds and ~100 tokens per session). Falls back to sanitized query text for filenames.
+- **`CHAIRMAN_WEB_SEARCH`**: Set to `true` to enable chairman fact-checking. When enabled, the chairman reviews Stage 1 responses, identifies factual claims to verify, performs web searches, and uses results to verify or correct claims during synthesis. Adds 2-5 seconds and ~500-1000 tokens per session.
 
 ### Custom Execution
 
@@ -315,7 +326,7 @@ ENABLE_WEB_SEARCH=false ai_council "search for something"
 
 - **Core:** Bash 3.2+ scripts orchestrating local CLI tools (macOS-compatible without Homebrew)
 - **Models:**
-  - OpenAI GPT-5.1 (via codex CLI) - **High reasoning effort** for all stages
+  - OpenAI GPT-5.1 (via OpenAI CLI, or Codex CLI as fallback) – high reasoning for council answers, low reasoning for search-planning prompts
   - Anthropic Claude Sonnet
   - Google Gemini 2.5 Pro
 - **Web Search:** Enhanced fork of [open-webSearch](https://github.com/Aas-ee/open-webSearch) with [mrkrsl/web-search-mcp](https://github.com/mrkrsl/web-search-mcp) features
@@ -364,12 +375,12 @@ Session Documentation
 
 ```
 ┌─────────────────────────────────────┐
-│     open-webSearch Server          │
+│     open-webSearch Docker Server    │
 │     (localhost:3000)                │
-│  ┌─────────┐      ┌─────────┐     │
-│  │   MCP   │      │  REST   │     │
-│  │ (stdio) │      │  API    │     │
-│  └────┬────┘      └────┬────┘     │
+│  ┌─────────┐      ┌─────────┐       │
+│  │   MCP   │      │  REST   │       │
+│  │ (stdio) │      │  API    │       │
+│  └────┬────┘      └────┬────┘       │
 │       └─────┬──────────┘           │
 │             ▼                      │
 │    ┌─────────────────┐             │
@@ -389,18 +400,6 @@ Session Documentation
          └──────┬───────┘
                 ▼
     terminal_council_with_websearch.sh
-```
-
-## Web UI (Optional, Archived)
-
-A web-based implementation exists but is **optional and archived**. The main development focus is on terminal scripts.
-
-The archived web UI (FastAPI + React + OpenRouter) provides a browser-based interface with conversation history and tab-based stage viewing. It's preserved in the `archive/web-ui` branch.
-
-To use the archived web UI:
-```bash
-git checkout archive/web-ui
-# Follow instructions in ARCHIVE_README.md
 ```
 
 ## Performance
